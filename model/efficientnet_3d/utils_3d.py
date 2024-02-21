@@ -254,9 +254,9 @@ class Conv3dStaticSamePadding(nn.Conv3d):
         pad_w = max((ow - 1) * self.stride[1] + (kw - 1) * self.dilation[1] + 1 - iw, 0)
         pad_d = max((od - 1) * self.stride[2] + (kd - 1) * self.dilation[2] + 1 - id, 0)
         if pad_h > 0 or pad_w > 0 or pad_d > 0:
-            self.static_padding = nn.ZeroPad3d((pad_w // 2, pad_w - pad_w // 2,
+            self.static_padding = nn.ConstantPad3d((pad_w // 2, pad_w - pad_w // 2,
                                                 pad_h // 2, pad_h - pad_h // 2,
-                                                pad_d // 2, pad_d - pad_d // 2 ))
+                                                pad_d // 2, pad_d - pad_d // 2 ), value=0)
         else:
             self.static_padding = nn.Identity()
 
@@ -325,7 +325,7 @@ class MaxPool3dStaticSamePadding(nn.MaxPool3d):
         pad_w = max((ow - 1) * self.stride[1] + (kw - 1) * self.dilation[1] + 1 - iw, 0)
         pad_d = max((od - 1) * self.stride[2] + (kd - 1) * self.dilation[2] + 1 - id, 0)
         if pad_h > 0 or pad_w > 0 or pad_d > 0:
-            self.static_padding = nn.ZeroPad3d((pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2, pad_d // 2, pad_d - pad_d // 2))
+            self.static_padding = nn.ConstantPad3d((pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2, pad_d // 2, pad_d - pad_d // 2), value=0)
         else:
             self.static_padding = nn.Identity()
 

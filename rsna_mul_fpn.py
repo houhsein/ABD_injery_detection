@@ -102,7 +102,11 @@ def data_progress_all(file, dicts):
         row['healthy']=0
         if row["liver_healthy"] ==1 and row["spleen_healthy"] ==1 and row["kidney_healthy"] ==1:
             row['healthy']=1
-        label = np.array([row["liver_low"],row["liver_high"],row["spleen_low"],row["spleen_high"],row["kidney_low"],row["kidney_high"],row['healthy']])
+        # Edit organ healthy label
+        label = np.array([row["kidney_healthy"],row["kidney_low"],row["kidney_high"],
+                          row["liver_healthy"],row["liver_low"],row["liver_high"],
+                          row["spleen_healthy"],row["spleen_low"],row["spleen_high"],
+                          row['healthy']])
         
         dicts.append({"image_liv": image_liv, "image_spl": image_spl, "image_kid_r": image_kid_r, "image_kid_l": image_kid_l, "label": label})
 
@@ -132,7 +136,7 @@ def duplicate(df, col_name, num_sample, pos_sel=True):
 
 # 依據positive情況進行資料切分
 def train_valid_test_split(df, ratio=(0.7, 0.1, 0.2), seed=0, test_fix=None):
-    
+
     df['group_key'] = df.apply(
     lambda row: (
         f"{row['liver_low']}_"
@@ -196,7 +200,12 @@ def run_once(times=0):
 
     # Model setting
     DenseBlock = DenseNet3D_FPN._DenseBlock
-    model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_mum=7, fpn_loss=fpn_loss)
+    if fpn_loss == 'concat':
+        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=9, fpn_loss=fpn_loss)
+    elif fpn_loss == 'softmax':
+        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_loss=fpn_loss)
+    elif fpn_loss == 'indivudial':
+        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_loss=fpn_loss)
 
     # for name, module in model.densenet3d.features.named_children():
     #     if isinstance(module, DenseBlock):  # 假设DenseBlock是Dense Blocks的类名
@@ -210,9 +219,12 @@ def run_once(times=0):
     else:
         model.to(device)
 
-
-
-    loss_function = nn.BCEWithLogitsLoss(reduction='mean')
+    if fpn_loss == 'softmax':
+        weights = [1.0, 2.0, 4.0]
+        class_weights = torch.FloatTensor(weights).to(device)
+        loss_function = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        loss_function = nn.BCEWithLogitsLoss(reduction='mean')
 
     # Grid search
     if len(init_lr) == 1:
@@ -252,7 +264,7 @@ def run_once(times=0):
     
 
     test_model = train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
-                        val_loader, early_stop, scheduler, check_path, fpn_loss)
+                        val_loader, early_stop, scheduler, check_path, fpn_loss, eval_score)
                     
     # plot train loss and metric 
     plot_loss_metric(config.epoch_loss_values, config.metric_values, check_path)
@@ -334,8 +346,9 @@ if __name__ == '__main__':
     lr_decay_epoch = conf.getint('Data_Setting','lr_decay_epoch')
     # whole, cropping_normal, cropping_convex, cropping_dilation
     # img_type = conf.get('Data_Setting','img_type')
-    loss_type = conf.get('Data_Setting','loss')
+    # loss_type = conf.get('Data_Setting','loss')
     fpn_loss = conf.get('Data_Setting','fpn_loss')
+    eval_score = conf.get('Data_Setting','eval_score')
     # bbox = conf.getboolean('Data_Setting','bbox')
     # attention_mask = conf.getboolean('Data_Setting','attention_mask')
     # HU range: ex 0,100
@@ -383,7 +396,7 @@ if __name__ == '__main__':
     All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
     All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 
-    df_all = All_data
+    df_all = All_data[:50]
     # if bbox and attention_mask:
         # raise ValueError("Only one of 'bbox' and 'attention_mask' can be selected as True.")
 

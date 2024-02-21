@@ -264,7 +264,7 @@ class DenseNet3D(nn.Module):
         return features
 
 class FPN3D(nn.Module):
-    def __init__(self, input_channels, output_channels, dropout, class_mum):
+    def __init__(self, input_channels, output_channels, dropout, class_num):
         super(FPN3D, self).__init__()
         self.output_channels = output_channels
         self.conv1 = nn.Conv3d(input_channels[0], output_channels, kernel_size=1)
@@ -278,25 +278,25 @@ class FPN3D(nn.Module):
             nn.Linear(3*256*2*2*2, 1000), 
             nn.Linear(1000, 512), 
             nn.Dropout(dropout),
-            nn.Linear(512, class_mum)   
+            nn.Linear(512, class_num)   
         )
         self.classifier_3 = nn.Sequential(
             nn.Linear(3*256*4*4*4, 1000), 
             nn.Linear(1000, 512), 
             nn.Dropout(dropout),
-            nn.Linear(512, class_mum)   
+            nn.Linear(512, class_num)   
         )
         self.classifier_2 = nn.Sequential(
             nn.Linear(3*256*8*8*8, 1000), 
             nn.Linear(1000, 512), 
             nn.Dropout(dropout),
-            nn.Linear(512, class_mum)  
+            nn.Linear(512, class_num)  
         )
         # self.classifier_1 = nn.Sequential(
         #     nn.Linear(3*256*16*16*16, 1000), 
         #     nn.Linear(1000, 512), 
         #     nn.Dropout(0.2),
-        #     nn.Linear(512, class_mum)  
+        #     nn.Linear(512, class_num)  
         # )
 
     def forward(self, x1, x2, x3):
@@ -347,8 +347,8 @@ class FPN3D(nn.Module):
         x2 = x3_up + x2
         # x2_up = self.upsample(x2)  # 将 x2 上采样到 x1 的尺寸
         # x1 = x2_up + x1
-
-        x4 = self.smooth(x4)
+        # gradcam 取的convd層
+        x4 = self.smooth(x4) 
         x3 = self.smooth(x3)
         x2 = self.smooth(x2)
         # x1 = self.smooth(x1)
@@ -357,12 +357,13 @@ class FPN3D(nn.Module):
         return x2, x3, x4
                           
 class DenseNet3D_FPN(nn.Module):
-    def __init__(self, n_input_channels=4, dropout=0.2, class_mum=7, fpn_loss='concat'):
+    def __init__(self, n_input_channels=4, dropout=0.2, class_num=9, fpn_loss='concat'):
         super(DenseNet3D_FPN, self).__init__()
         self.fpn_loss = fpn_loss
         self.densenet3d = DenseNet3D()
-        self.fpn = FPN3D(input_channels=[256, 512, 1024, 1024], output_channels=256, dropout=0.2, class_mum=7)
-        self.classifier = nn.Linear(class_mum*3, class_mum)
+        self.fpn = FPN3D(input_channels=[256, 512, 1024, 1024], output_channels=256, dropout=0.2, class_num=class_num)
+        # class_num * FPN layer層數
+        self.classifier = nn.Linear(class_num*3, class_num)
 
     def forward(self, x1,x2,x3):
         features, features2, features3 = self.densenet3d(x1,x2,x3)  # 这将是一个特征图列表

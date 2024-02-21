@@ -22,7 +22,7 @@ from skimage.measure import label as sk_label
 from skimage.measure import regionprops as sk_regions
 from skimage.transform import resize
 from tqdm import tqdm, trange
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, log_loss
 # Based on MONAI 1.1
 from monai.transforms.transform import MapTransform
 from monai.utils import ensure_tuple_rep
@@ -319,6 +319,110 @@ def adjust_learning_rate(optimizer, epoch, init_lr, decay_rate=.5):
     #print('LR is set to {}'.format(param_group['lr']))
     return optimizer , lr
 '''
+# RSNA Weighted Mean score
+# Editting for list not df
+def normalize_probabilities_to_one(df: pd.DataFrame, group_columns: list) -> pd.DataFrame:
+    # Normalize the sum of each row's probabilities to 100%.
+    # 0.75, 0.75 => 0.5, 0.5
+    # 0.1, 0.1 => 0.5, 0.5
+    row_totals = df[group_columns].sum(axis=1)
+    if row_totals.min() == 0:
+        raise ParticipantVisibleError('All rows must contain at least one non-zero prediction')
+    for col in group_columns:
+        df[col] /= row_totals
+    return df
+
+def create_training_solution(y_train):
+    sol_train = y_train.copy()
+    
+    # bowel healthy|injury sample weight = 1|2
+    #sol_train['bowel_weight'] = np.where(sol_train['bowel_injury'] == 1, 2, 1)
+    
+    # extravasation healthy/injury sample weight = 1|6
+    #sol_train['extravasation_weight'] = np.where(sol_train['extravasation_injury'] == 1, 6, 1)
+    
+    # kidney healthy|low|high sample weight = 1|2|4
+    sol_train['kidney_weight'] = np.where(sol_train['kidney_low'] == 1, 2, np.where(sol_train['kidney_high'] == 1, 4, 1))
+    
+    # liver healthy|low|high sample weight = 1|2|4
+    sol_train['liver_weight'] = np.where(sol_train['liver_low'] == 1, 2, np.where(sol_train['liver_high'] == 1, 4, 1))
+    
+    # spleen healthy|low|high sample weight = 1|2|4
+    sol_train['spleen_weight'] = np.where(sol_train['spleen_low'] == 1, 2, np.where(sol_train['spleen_high'] == 1, 4, 1))
+    
+    # any healthy|injury sample weight = 1|6
+    sol_train['any_injury_weight'] = np.where(sol_train['any_injury'] == 1, 6, 1)
+    return sol_train
+
+def rsna_score_cal(solution: pd.DataFrame, submission: pd.DataFrame) -> float:
+    '''
+    Pseudocode:
+    1. For every label group (liver, bowel, etc):
+        - Normalize the sum of each row's probabilities to 100%.
+        - Calculate the sample weighted log loss.
+    2. Derive a new any_injury label by taking the max of 1 - p(healthy) for each label group
+    3. Calculate the sample weighted log loss for the new label group
+    4. Return the average of all of the label group log losses as the final score.
+    '''
+
+    # # Run basic QC checks on the inputs
+    # if not pandas.api.types.is_numeric_dtype(submission.values):
+    #     raise ParticipantVisibleError('All submission values must be numeric')
+
+    # if not np.isfinite(submission.values).all():
+    #     raise ParticipantVisibleError('All submission values must be finite')
+
+    # if solution.min().min() < 0:
+    #     raise ParticipantVisibleError('All labels must be at least zero')
+    # if submission.min().min() < 0:
+    #     raise ParticipantVisibleError('All predictions must be at least zero')
+
+    # Calculate the label group log losses
+
+    triple_level_targets = ['kidney', 'liver', 'spleen']
+    all_target_categories = triple_level_targets
+
+    # smaple weight
+    scale_by_2 = ['kidney_low','liver_low','spleen_low']
+    scale_by_4 = ['kidney_high','liver_high','spleen_high']
+    sf_2 = 2
+    sf_4 = 4
+    sf_6 = 6
+    submission[scale_by_2] *= sf_2
+    submission[scale_by_4] *= sf_4
+
+    # log loss weight
+    solution = create_training_solution(solution)
+    label_group_losses = []
+    for category in all_target_categories:
+        col_group = [f'{category}_healthy', f'{category}_low', f'{category}_high']
+
+        solution = normalize_probabilities_to_one(solution, col_group)
+
+        for col in col_group:
+            if col not in submission.columns:
+                raise ParticipantVisibleError(f'Missing submission column {col}')
+
+        submission = normalize_probabilities_to_one(submission, col_group)
+        label_group_losses.append(
+            log_loss(
+                y_true=solution[col_group].values,
+                y_pred=submission[col_group].values,
+                sample_weight=solution[f'{category}_weight'].values
+            )
+        )
+    # Derive a new any_injury label by taking the max of 1 - p(healthy) for each label group
+    healthy_cols = [x + '_healthy' for x in all_target_categories]
+    any_injury_labels = (1 - solution[healthy_cols]).max(axis=1)
+    # any_injury is sf_6
+    any_injury_predictions = (1 - submission[healthy_cols]).max(axis=1)
+    any_injury_loss = log_loss(
+        y_true=any_injury_labels.values,
+        y_pred=any_injury_predictions.values,
+        sample_weight=solution['any_injury_weight'].values
+    )
+    label_group_losses.append(any_injury_loss)
+    return np.mean(label_group_losses)
 
 def train(model, device, data_num, epochs, optimizer, loss_function, train_loader, valid_loader, early_stop, scheduler, check_path):
     # Let ini config file can be writted
@@ -416,7 +520,7 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
     return model
 
 def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, 
-    valid_loader, early_stop, scheduler, check_path, fpn_loss='concat'):
+    valid_loader, early_stop, scheduler, check_path, fpn_loss='concat', eval_score='total_score'):
     # Let ini config file can be writted
     # fpn loss 分成 concat, softmax, individual
     best_metric = -1
@@ -440,6 +544,7 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         first_start_time = time.time()
         for batch_data in train_loader:
             step += 1
+            # kidney_healthy,kidney_low,kidney_high,liver_healthy,liver_low,liver_high,spleen_healthy,spleen_low,spleen_high,healthy
             labels = batch_data['label'].float().to(device)
             input_liv, input_spl, input_kid_r, input_kid_l = batch_data['image_liv'].to(device), batch_data['image_spl'].to(device), \
                                                             batch_data['image_kid_r'].to(device), batch_data['image_kid_l'].to(device)                              
@@ -450,14 +555,14 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                 if fpn_loss == 'concat':
                     outputs = model(input_liv, input_spl, input_kid)
                     # outputs = F.sigmoid(outputs)
-                    loss = loss_function(outputs, labels)
+                    loss = loss_function(outputs, labels[:-1])
                 # softmax 分開不同器官的結果
                 elif fpn_loss == 'softmax':
                     out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
                     # label分開
-                    label_liv = labels[:,[6,0,1]]
-                    label_spl = labels[:,[6,2,3]]
-                    label_kid = labels[:,[6,4,5]]
+                    label_kid = labels[:,0:3]
+                    label_spl = labels[:,3:6]
+                    label_liv = labels[:,6:9]
                     loss_l = loss_function(out_liv, label_liv)
                     loss_s = loss_function(out_spl, label_spl)
                     loss_k = loss_function(out_kid, label_kid)
@@ -486,7 +591,7 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         minutes, seconds = divmod(rem, 60)
         print(f'one epoch runtime:{int(minutes)}:{seconds}')
         # Early stopping & save best weights by using validation
-        metric = valid_mul_fpn(model, valid_loader, device, fpn_loss)
+        metric = valid_mul_fpn(model, valid_loader, device, eval_score)
         scheduler.step(metric)
 
         # checkpoint setting
@@ -678,44 +783,75 @@ def calculate_multi_label_accuracy(predictions, ground_truths):
 
     return accuracy.item()
     
-def valid_mul_fpn(model, val_loader, device, fpn_loss):
+def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
     #metric_values = list()
     model.eval()
     with torch.no_grad():
-        num_correct = 0.0
+        num_correct = 0
         metric_count = 0
         total_labels = 0
         total_score = 0.0
-        total_acc = 0.0
-        num_correct_labels = 0.0
+        total_kid_acc = 0.0
+        total_acc = {"kid": 0, "liv": 0, "spl": 0}
+        index_ranges = {"kid": (0, 3), "liv": (3, 6), "spl": (6, 9)}
+        column_names_sol = ['kidney_healthy', 'kidney_low', 'kidney_high',
+                        'liver_healthy', 'liver_low', 'liver_high',
+                        'spleen_healthy', 'spleen_low', 'spleen_high','any_injury']
+        # submit any_injury col is generate in rsna_score_cal
+        column_names_sub = ['kidney_healthy', 'kidney_low', 'kidney_high',
+                        'liver_healthy', 'liver_low', 'liver_high',
+                        'spleen_healthy', 'spleen_low', 'spleen_high']
+        rsna_solution_df = pd.DataFrame(columns=column_names_sol)
+        rsna_submission_df = pd.DataFrame(columns=column_names_sub)
         for val_data in val_loader:
             input_liv, input_spl, input_kid_r, input_kid_l = val_data['image_liv'].to(device), val_data['image_spl'].to(device), \
                                                 val_data['image_kid_r'].to(device), val_data['image_kid_l'].to(device)
             val_labels = val_data['label'].to(device)
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
             val_outputs = model(input_liv, input_spl, input_kid)
-            # print(val_outputs.size())
+            # 確認output是否為器官預測分開的結果
+            if isinstance(val_outputs, tuple):
+                # kidney, liver, spleen
+                val_outputs = torch.cat((val_outputs[2], val_outputs[0], val_outputs[1]), dim=1)
+            # RSNA score 
+            # log loss需要全部一起看，先建立df
+            sol_tmp = pd.DataFrame(val_labels.cpu().numpy(), columns=column_names_sol)
+            sub_tmp = pd.DataFrame(val_outputs.cpu().numpy(), columns=column_names_sub)
+            rsna_solution_df = pd.concat([rsna_solution_df, sol_tmp], ignore_index=True)
+            rsna_submission_df = pd.concat([rsna_submission_df, sub_tmp], ignore_index=True)
             # 根據每個標籤預測正確的比例
             binary_predictions = (val_outputs > 0.5).float()
-            for prediction, ground_truth in zip(binary_predictions, val_labels):
-                accuracy = calculate_multi_label_accuracy(prediction, ground_truth)
-                total_acc = total_acc + accuracy
+            for prediction, ground_truth in zip(binary_predictions, val_labels[:,:-1]):
+                for part, (start_idx, end_idx) in index_ranges.items():
+                    accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
+                    total_acc[part] += accuracy
                 num_correct += 1
             # 計算標籤完全正確的比例
-            val_labels = val_labels.cpu().numpy()
+            val_labels = val_labels[:,:-1].cpu().numpy()
             binary_predictions = binary_predictions.cpu().numpy()
             score = accuracy_score(val_labels, binary_predictions)
             total_score += score
             total_labels += 1
-        metric = total_acc / num_correct
+        # transfer df to numeric
+        rsna_solution_df[column_names_sol] = rsna_solution_df[column_names_sol].apply(pd.to_numeric)
+        rsna_submission_df[column_names_sub] = rsna_submission_df[column_names_sub].apply(pd.to_numeric)
+        rsna_score = rsna_score_cal(rsna_solution_df, rsna_submission_df)
+        metric = {part: acc / num_correct for part, acc in total_acc.items()}
         score = total_score / total_labels
         config.metric_values.append(metric)
 
         
-        print(f'validation acc:{metric}',flush =True)
+        print(f'validation kid acc:{metric["kid"]}, liv acc:{metric["liv"]}, spl acc:{metric["spl"]}',flush =True)
         print(f'validation total acc:{score}',flush =True)
+        print(f'validation rsna:{rsna_score}',flush =True)
         #print(f'validation metric:{config.metric_values}',flush =True)
-    return score
+    if eval_score == 'total_acc':
+        return score
+    elif eval_score == 'acc':
+        return sum(metric.values()) / len(metric)
+    elif eval_score =='rsna_score':
+        return rsna_score
+
 
 def validation(model, val_loader, device):
     #metric_values = list()
