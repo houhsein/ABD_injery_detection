@@ -357,9 +357,9 @@ class FPN3D(nn.Module):
         return x2, x3, x4
                           
 class DenseNet3D_FPN(nn.Module):
-    def __init__(self, n_input_channels=4, dropout=0.2, class_num=9, fpn_loss='concat'):
+    def __init__(self, n_input_channels=4, dropout=0.2, class_num=9, fpn_type='concat'):
         super(DenseNet3D_FPN, self).__init__()
-        self.fpn_loss = fpn_loss
+        self.fpn_type = fpn_type
         self.densenet3d = DenseNet3D()
         self.fpn = FPN3D(input_channels=[256, 512, 1024, 1024], output_channels=256, dropout=0.2, class_num=class_num)
         # class_num * FPN layer層數
@@ -369,18 +369,18 @@ class DenseNet3D_FPN(nn.Module):
         features, features2, features3 = self.densenet3d(x1,x2,x3)  # 这将是一个特征图列表
         # fpn_layer1, fpn_layer2, fpn_layer3, fpn_layer4  = self.fpn(features, features2, features3)  # FPN3D 处理特征图列表
         fpn_layer2, fpn_layer3, fpn_layer4  = self.fpn(features, features2, features3)
-        if self.fpn_loss == 'concat':
+        if self.fpn_type == 'concat':
             # out_concat = torch.cat((fpn_layer1, fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
             out_concat = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
             outputs = self.classifier(out_concat)
             return outputs
 
-        elif self.fpn_loss == 'softmax':
+        elif self.fpn_type == 'split':
             out_concat = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
             output_liv = self.classifier(out_concat)
             output_spl = self.classifier(out_concat)
             output_kid = self.classifier(out_concat)
             return output_liv, output_spl, output_kid
 
-        elif self.fpn_loss == 'indivudial':
+        elif self.fpn_type == 'indivudial':
             return fpn_layer2, fpn_layer3, fpn_layer4

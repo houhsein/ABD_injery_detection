@@ -200,12 +200,12 @@ def run_once(times=0):
 
     # Model setting
     DenseBlock = DenseNet3D_FPN._DenseBlock
-    if fpn_loss == 'concat':
-        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=9, fpn_loss=fpn_loss)
-    elif fpn_loss == 'softmax':
-        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_loss=fpn_loss)
-    elif fpn_loss == 'indivudial':
-        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_loss=fpn_loss)
+    if fpn_type == 'concat':
+        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=9, fpn_type=fpn_type)
+    elif fpn_type == 'split':
+        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_type=fpn_type)
+    elif fpn_type == 'individual':
+        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_type=fpn_type)
 
     # for name, module in model.densenet3d.features.named_children():
     #     if isinstance(module, DenseBlock):  # 假设DenseBlock是Dense Blocks的类名
@@ -219,12 +219,16 @@ def run_once(times=0):
     else:
         model.to(device)
 
-    if fpn_loss == 'softmax':
+    if fpn_type == 'split':
         weights = [1.0, 2.0, 4.0]
         class_weights = torch.FloatTensor(weights).to(device)
-        loss_function = nn.CrossEntropyLoss(weight=class_weights)
+    # concat,individual
     else:
-        loss_function = nn.BCEWithLogitsLoss(reduction='mean')
+        weights = [1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
+        class_weights = torch.FloatTensor(weights).to(device)
+    loss_function = nn.CrossEntropyLoss(weight=class_weights)
+    # else:
+    #     loss_function = nn.BCEWithLogitsLoss(reduction='mean')
 
     # Grid search
     if len(init_lr) == 1:
@@ -264,7 +268,7 @@ def run_once(times=0):
     
 
     test_model = train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
-                        val_loader, early_stop, scheduler, check_path, fpn_loss, eval_score)
+                        val_loader, early_stop, scheduler, check_path, fpn_type, eval_score)
                     
     # plot train loss and metric 
     plot_loss_metric(config.epoch_loss_values, config.metric_values, check_path)
@@ -289,7 +293,7 @@ def run_once(times=0):
     file_list.append(now)
     epoch_list.append(config.best_metric_epoch)
 
-    test_acc = valid_mul_fpn(model, test_loader, device, fpn_loss)
+    test_acc = valid_mul_fpn(model, test_loader, device, eval_score)
     test_accuracy_list.append(test_acc)
     del test_ds
     del test_loader
@@ -347,7 +351,7 @@ if __name__ == '__main__':
     # whole, cropping_normal, cropping_convex, cropping_dilation
     # img_type = conf.get('Data_Setting','img_type')
     # loss_type = conf.get('Data_Setting','loss')
-    fpn_loss = conf.get('Data_Setting','fpn_loss')
+    fpn_type = conf.get('Data_Setting','fpn_type')
     eval_score = conf.get('Data_Setting','eval_score')
     # bbox = conf.getboolean('Data_Setting','bbox')
     # attention_mask = conf.getboolean('Data_Setting','attention_mask')
@@ -387,12 +391,12 @@ if __name__ == '__main__':
     # kidney_neg['Left_check'] = '0'
 
     # Data progressing
-    All_data = pd.read_csv("/tf/yilian618/rsna_train_new_v2.csv")
+    All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
     pos_data = All_data[All_data['any_injury']==1]
     neg_data = All_data[All_data['any_injury']==0].sample(n=300, random_state=seed)
     All_data = pd.concat([pos_data, neg_data])
-    no_seg_kid = pd.read_csv("/tf/yilian618/nosegmentation_kid.csv")
-    no_seg = pd.read_csv("/tf/yilian618/nosegmentation.csv")
+    no_seg_kid = pd.read_csv("/SSD/rsna-2023/nosegmentation_kid.csv")
+    no_seg = pd.read_csv("/SSD/rsna-2023/nosegmentation.csv")
     All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
     All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 

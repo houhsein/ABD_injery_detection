@@ -520,7 +520,7 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
     return model
 
 def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, 
-    valid_loader, early_stop, scheduler, check_path, fpn_loss='concat', eval_score='total_score'):
+    valid_loader, early_stop, scheduler, check_path, fpn_type='concat', eval_score='total_score'):
     # Let ini config file can be writted
     # fpn loss 分成 concat, softmax, individual
     best_metric = -1
@@ -551,13 +551,13 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                # FPN layer concate
-                if fpn_loss == 'concat':
+                # FPN layer concate 分所有結果
+                if fpn_type == 'concat':
                     outputs = model(input_liv, input_spl, input_kid)
                     # outputs = F.sigmoid(outputs)
                     loss = loss_function(outputs, labels[:-1])
-                # softmax 分開不同器官的結果
-                elif fpn_loss == 'softmax':
+                # FPN layer concate 分不同器官的結果
+                elif fpn_type == 'split':
                     out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
                     # label分開
                     label_kid = labels[:,0:3]
@@ -568,7 +568,7 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                     loss_k = loss_function(out_kid, label_kid)
                     loss = loss_l + loss_s + loss_k
                 # 各FPN layer分開運算loss再相加
-                elif fpn_loss == 'individual':
+                elif fpn_type == 'individual':
                     fpn_layer2, fpn_layer3, fpn_layer4 = model(input_liv, input_spl, input_kid)
                     loss_2 = loss_function(fpn_layer2, labels)
                     loss_3 = loss_function(fpn_layer3, labels)
@@ -809,10 +809,15 @@ def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
             val_labels = val_data['label'].to(device)
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
             val_outputs = model(input_liv, input_spl, input_kid)
+            # 先前沒有經過softmax，因此valid記得做，避免後續預測有問題
+            
             # 確認output是否為器官預測分開的結果
             if isinstance(val_outputs, tuple):
+                val_outputs = [F.softmax(tensor, dim=1) for tensor in val_outputs]
                 # kidney, liver, spleen
                 val_outputs = torch.cat((val_outputs[2], val_outputs[0], val_outputs[1]), dim=1)
+            else:
+                val_outputs = F.softmax(val_outputs, dim=1)
             # RSNA score 
             # log loss需要全部一起看，先建立df
             sol_tmp = pd.DataFrame(val_labels.cpu().numpy(), columns=column_names_sol)
@@ -838,7 +843,7 @@ def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
         rsna_score = rsna_score_cal(rsna_solution_df, rsna_submission_df)
         metric = {part: acc / num_correct for part, acc in total_acc.items()}
         score = total_score / total_labels
-        config.metric_values.append(metric)
+        config.metric_values.append(sum(metric.values()) / len(metric))
 
         
         print(f'validation kid acc:{metric["kid"]}, liv acc:{metric["liv"]}, spl acc:{metric["spl"]}',flush =True)
