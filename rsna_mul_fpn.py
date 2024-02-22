@@ -400,7 +400,7 @@ if __name__ == '__main__':
     All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
     All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 
-    df_all = All_data[:50]
+    df_all = All_data
     # if bbox and attention_mask:
         # raise ValueError("Only one of 'bbox' and 'attention_mask' can be selected as True.")
 

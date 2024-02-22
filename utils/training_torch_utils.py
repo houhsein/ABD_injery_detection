@@ -523,9 +523,9 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
     valid_loader, early_stop, scheduler, check_path, fpn_type='concat', eval_score='total_score'):
     # Let ini config file can be writted
     # fpn loss 分成 concat, softmax, individual
-    best_metric = -1
     best_metric_epoch = -1
     trigger_times = 0
+    num_correct = 0
     if early_stop == 0:
         early_stop = None
     #epoch_loss_values = list()
@@ -541,6 +541,8 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         model.train()
         epoch_loss = 0
         step = 0
+        total_train_acc = {"kid": 0, "liv": 0, "spl": 0}
+        index_ranges = {"kid": (0, 3), "liv": (3, 6), "spl": (6, 9)}
         first_start_time = time.time()
         for batch_data in train_loader:
             step += 1
@@ -556,6 +558,14 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                     outputs = model(input_liv, input_spl, input_kid)
                     # outputs = F.sigmoid(outputs)
                     loss = loss_function(outputs, labels[:-1])
+                    # train accuracy
+                    outputs = F.softmax(outputs, dim=1)
+                    binary_predictions = (outputs > 0.5).float()
+                    for prediction, ground_truth in zip(binary_predictions, labels[:,:-1]):
+                        for part, (start_idx, end_idx) in index_ranges.items():
+                            accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
+                            total_train_acc[part] += accuracy
+                        num_correct += 1
                 # FPN layer concate 分不同器官的結果
                 elif fpn_type == 'split':
                     out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
@@ -567,6 +577,15 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                     loss_s = loss_function(out_spl, label_spl)
                     loss_k = loss_function(out_kid, label_kid)
                     loss = loss_l + loss_s + loss_k
+                    # train accuracy
+                    outputs = torch.cat((out_kid,out_liv,out_spl), dim=1)
+                    outputs = F.softmax(outputs, dim=1)
+                    binary_predictions = (outputs > 0.5).float()
+                    for prediction, ground_truth in zip(binary_predictions, labels[:,:-1]):
+                        for part, (start_idx, end_idx) in index_ranges.items():
+                            accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
+                            total_train_acc[part] += accuracy
+                        num_correct += 1
                 # 各FPN layer分開運算loss再相加
                 elif fpn_type == 'individual':
                     fpn_layer2, fpn_layer3, fpn_layer4 = model(input_liv, input_spl, input_kid)
@@ -574,6 +593,15 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                     loss_3 = loss_function(fpn_layer3, labels)
                     loss_4 = loss_function(fpn_layer4, labels)
                     loss = loss_2 + loss_3 + loss_4
+                    # train accuracy
+                    outputs = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
+                    outputs = F.softmax(outputs, dim=1)
+                    binary_predictions = (outputs > 0.5).float()
+                    for prediction, ground_truth in zip(binary_predictions, labels[:,:-1]):
+                        for part, (start_idx, end_idx) in index_ranges.items():
+                            accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
+                            total_train_acc[part] += accuracy
+                        num_correct += 1
             # loss.backward()
             # optimizer.step()
             scaler.scale(loss).backward()
@@ -584,8 +612,10 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
             print(f"{step}/{epoch_len}, train_loss: {loss.item():.4f}")
             writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
         epoch_loss /= step
+        metric = {part: acc / num_correct for part, acc in total_train_acc.items()}
         config.epoch_loss_values.append(epoch_loss)
         print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
+        print(f'epoch {epoch + 1} average accuracy: {sum(metric.values()) / len(metric):.4f}')
         final_end_time = time.time()
         hours, rem = divmod(final_end_time-first_start_time, 3600)
         minutes, seconds = divmod(rem, 60)
@@ -593,9 +623,14 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         # Early stopping & save best weights by using validation
         metric = valid_mul_fpn(model, valid_loader, device, eval_score)
         scheduler.step(metric)
-
+        if eval_score == 'rsna_score':
+            comparison_operator = lambda a, b: a < b
+            best_metric = 1000
+        else:
+            comparison_operator = lambda a, b: a > b
+            best_metric = -1
         # checkpoint setting
-        if metric > best_metric:
+        if comparison_operator(metric, best_metric):
             # reset trigger_times
             trigger_times = 0
             best_metric = metric
@@ -791,7 +826,6 @@ def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
         metric_count = 0
         total_labels = 0
         total_score = 0.0
-        total_kid_acc = 0.0
         total_acc = {"kid": 0, "liv": 0, "spl": 0}
         index_ranges = {"kid": (0, 3), "liv": (3, 6), "spl": (6, 9)}
         column_names_sol = ['kidney_healthy', 'kidney_low', 'kidney_high',
