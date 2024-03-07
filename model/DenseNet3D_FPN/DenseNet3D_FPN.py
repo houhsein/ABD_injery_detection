@@ -307,7 +307,7 @@ class FPN3D(nn.Module):
         out_spl2, out_spl3, out_spl4 = self.process_input(x2)
         out_kid2, out_kid3, out_kid4 = self.process_input(x3)
         
-        # 各Input的feature整合，可以有其他方法
+        # TODO　各Input的feature整合，可以有其他方法
         # feature_concated_1 = torch.cat((out_liv1, out_spl1, out_kid1), dim=1) 
         feature_concated_2 = torch.cat((out_liv2, out_spl2, out_kid2), dim=1) 
         feature_concated_3 = torch.cat((out_liv3, out_spl3, out_kid3), dim=1)
@@ -369,6 +369,7 @@ class DenseNet3D_FPN(nn.Module):
         features, features2, features3 = self.densenet3d(x1,x2,x3)  # 这将是一个特征图列表
         # fpn_layer1, fpn_layer2, fpn_layer3, fpn_layer4  = self.fpn(features, features2, features3)  # FPN3D 处理特征图列表
         fpn_layer2, fpn_layer3, fpn_layer4  = self.fpn(features, features2, features3)
+        # TODO concat 有問題，應該可以直接刪除
         if self.fpn_type == 'concat':
             # out_concat = torch.cat((fpn_layer1, fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
             out_concat = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
