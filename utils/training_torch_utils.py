@@ -520,13 +520,19 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
     return model
 
 def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, 
-    valid_loader, early_stop, scheduler, check_path, fpn_type='concat', eval_score='total_score'):
+    valid_loader, early_stop, scheduler, check_path, fpn_type='label_concat', eval_score='total_score'):
     # Let ini config file can be writted
     # fpn loss 分成 concat, softmax, individual
     best_metric_epoch = -1
     trigger_times = 0
     if early_stop == 0:
         early_stop = None
+    if eval_score == 'rsna_score':
+        comparison_operator = lambda a, b: a < b
+        best_metric = 1000
+    else:
+        comparison_operator = lambda a, b: a > b
+        best_metric = -1
     #epoch_loss_values = list()
     # 混合精度學習
     scaler = torch.cuda.amp.GradScaler()
@@ -554,9 +560,9 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                # FPN layer concate 分所有結果
+                # FPN layer 各自算loss
                 # TODO concat 需要修改 不能直接用softmax
-                if fpn_type == 'concat':
+                if fpn_type == 'split':
                     outputs = model(input_liv, input_spl, input_kid)
                     # outputs = F.sigmoid(outputs)
                     loss = loss_function(outputs, labels[:-1])
@@ -569,7 +575,7 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                             total_train_acc[part] += accuracy
                         num_acc += 1
                 # FPN layer concate 分不同器官的結果
-                elif fpn_type == 'split':
+                elif fpn_type == 'label_concat':
                     out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
                     # label分開
                     label_kid = labels[:,0:3]
@@ -589,9 +595,9 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                             accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
                             total_train_acc[part] += accuracy
                         num_acc += 1
-                # 各FPN layer分開運算loss再相加
+                # 各FPN layer resize並concat成一個feature map
                 # TODO individual 需要修改 不能直接用softmax
-                elif fpn_type == 'individual':
+                elif fpn_type == 'feature_concat':
                     fpn_layer2, fpn_layer3, fpn_layer4 = model(input_liv, input_spl, input_kid)
                     loss_2 = loss_function(fpn_layer2, labels)
                     loss_3 = loss_function(fpn_layer3, labels)
@@ -631,12 +637,6 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         # Early stopping & save best weights by using validation
         metric = valid_mul_fpn(model, valid_loader, device, eval_score)
         scheduler.step(metric)
-        if eval_score == 'rsna_score':
-            comparison_operator = lambda a, b: a < b
-            best_metric = 1000
-        else:
-            comparison_operator = lambda a, b: a > b
-            best_metric = -1
         # checkpoint setting
         if comparison_operator(metric, best_metric):
             # reset trigger_times

@@ -25,6 +25,7 @@ import sys
 # 路徑要根據你的docker路徑來設定
 sys.path.append("/tf/jacky831006/ABD_classification/model/")
 from efficientnet_3d.model_3d import EfficientNet3D
+from efficientnet_3d.Efficient3D_BIFPN import EfficientNet3D_BiFPN
 from resnet_3d import resnet_3d
 from DenseNet3D_FPN import DenseNet3D_FPN
 # 此架構參考這篇
@@ -199,13 +200,22 @@ def run_once(times=0):
         print("Only one")
 
     # Model setting
-    DenseBlock = DenseNet3D_FPN._DenseBlock
-    if fpn_type == 'concat':
-        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=9, fpn_type=fpn_type)
-    elif fpn_type == 'split':
-        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_type=fpn_type)
-    elif fpn_type == 'individual':
-        model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, dropout=0.2, class_num=3, fpn_type=fpn_type)
+    # DenseBlock = DenseNet3D_FPN._DenseBlock
+    if architecture == 'densenet':
+        if fpn_type == 'label_concat':
+            model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, num_init_features=size[0], dropout=0.2, class_num=9, fpn_type=fpn_type)
+        elif fpn_type == 'split':
+            model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, num_init_features=size[0], dropout=0.2, class_num=3, fpn_type=fpn_type)
+        elif fpn_type == 'feature_concat':
+            model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, num_init_features=size[0], dropout=0.2, class_num=3, fpn_type=fpn_type)
+    elif architecture == 'efficientnet':
+        if fpn_type == 'label_concat':
+            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+        elif fpn_type == 'split':
+            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+        elif fpn_type == 'feature_concat':
+            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+
 
     # for name, module in model.densenet3d.features.named_children():
     #     if isinstance(module, DenseBlock):  # 假设DenseBlock是Dense Blocks的类名
@@ -219,13 +229,13 @@ def run_once(times=0):
     else:
         model.to(device)
 
-    if fpn_type == 'split':
-        weights = [1.0, 2.0, 4.0]
-        class_weights = torch.FloatTensor(weights).to(device)
+    # all class split in healthy, low, high
+    weights = [1.0, 2.0, 4.0]
+    class_weights = torch.FloatTensor(weights).to(device)
     # concat,individual
-    else:
-        weights = [1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
-        class_weights = torch.FloatTensor(weights).to(device)
+    # else:
+    #     weights = [1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
+    #     class_weights = torch.FloatTensor(weights).to(device)
     loss_function = nn.CrossEntropyLoss(weight=class_weights)
     # else:
     #     loss_function = nn.BCEWithLogitsLoss(reduction='mean')
@@ -266,7 +276,7 @@ def run_once(times=0):
     #test_model = train(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
     #                    val_loader, early_stop, init_lr, lr_decay_rate, lr_decay_epoch, check_path)
     
-
+   
     test_model = train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
                         val_loader, early_stop, scheduler, check_path, fpn_type, eval_score)
                     
@@ -327,9 +337,9 @@ if __name__ == '__main__':
     scale_range = eval(conf.get('Rand3DElasticd','scale_range'))
 
     # Data_setting
-    # architecture = conf.get('Data_Setting','architecture')
-    # if architecture == 'efficientnet':
-        # structure_num = conf.get('Data_Setting', 'structure_num')
+    architecture = conf.get('Data_Setting','architecture')
+    if architecture == 'efficientnet':
+        structure_num = conf.get('Data_Setting', 'structure_num')
     gpu_num = conf.get('Data_Setting','gpu')
     seed = conf.getint('Data_Setting','seed')
     cross_kfold = conf.getint('Data_Setting','cross_kfold')
@@ -389,7 +399,7 @@ if __name__ == '__main__':
     # kidney_neg = kidney_neg.drop_duplicates(subset=['chartNo'],keep='first')
     # kidney_neg['Right_check'] = '0'
     # kidney_neg['Left_check'] = '0'
-
+    torch.autograd.set_detect_anomaly(True)
     # Data progressing
     All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
     pos_data = All_data[All_data['any_injury']==1]
@@ -400,7 +410,7 @@ if __name__ == '__main__':
     All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
     All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 
-    df_all = All_data
+    df_all = All_data[:100]
     # if bbox and attention_mask:
         # raise ValueError("Only one of 'bbox' and 'attention_mask' can be selected as True.")
 

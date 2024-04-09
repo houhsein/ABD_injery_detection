@@ -275,19 +275,19 @@ class FPN3D(nn.Module):
         self.smooth = nn.Conv3d(output_channels, output_channels, kernel_size=3, stride=1, padding=1)
         
         self.classifier_4 = nn.Sequential(
-            nn.Linear(3*256*2*2*2, 1000), 
+            nn.Linear(256*2*2*2, 1000), 
             nn.Linear(1000, 512), 
             nn.Dropout(dropout),
             nn.Linear(512, class_num)   
         )
         self.classifier_3 = nn.Sequential(
-            nn.Linear(3*256*4*4*4, 1000), 
+            nn.Linear(256*4*4*4, 1000), 
             nn.Linear(1000, 512), 
             nn.Dropout(dropout),
             nn.Linear(512, class_num)   
         )
         self.classifier_2 = nn.Sequential(
-            nn.Linear(3*256*8*8*8, 1000), 
+            nn.Linear(256*8*8*8, 1000), 
             nn.Linear(1000, 512), 
             nn.Dropout(dropout),
             nn.Linear(512, class_num)  
@@ -303,32 +303,37 @@ class FPN3D(nn.Module):
         # out_liv1, out_liv2, out_liv3, out_liv4 = self.process_input(x1)
         # out_spl1, out_spl2, out_spl3, out_spl4 = self.process_input(x2)
         # out_kid1, out_kid2, out_kid3, out_kid4 = self.process_input(x3)
-        out_liv2, out_liv3, out_liv4 = self.process_input(x1)
-        out_spl2, out_spl3, out_spl4 = self.process_input(x2)
-        out_kid2, out_kid3, out_kid4 = self.process_input(x3)
+        outputs = {}
+        outputs["out_liv2"], outputs["out_liv3"], outputs["out_liv4"] = self.process_input(x1)
+        outputs["out_spl2"], outputs["out_spl3"], outputs["out_spl4"] = self.process_input(x2)
+        outputs["out_kid2"], outputs["out_kid3"], outputs["out_kid4"] = self.process_input(x3)
+        organ_list = ['liv','spl','kid']
         
         # TODO　各Input的feature整合，可以有其他方法
         # feature_concated_1 = torch.cat((out_liv1, out_spl1, out_kid1), dim=1) 
-        feature_concated_2 = torch.cat((out_liv2, out_spl2, out_kid2), dim=1) 
-        feature_concated_3 = torch.cat((out_liv3, out_spl3, out_kid3), dim=1)
-        feature_concated_4 = torch.cat((out_liv4, out_spl4, out_kid4), dim=1)
-        
-        # feature_concated_1 = feature_concated_1.view(feature_concated_1.size(0), -1)
-        feature_concated_2 = feature_concated_2.view(feature_concated_2.size(0), -1)
-        feature_concated_3 = feature_concated_3.view(feature_concated_3.size(0), -1)
-        feature_concated_4 = feature_concated_4.view(feature_concated_4.size(0), -1)
-        
-        # 各自全連接分類結果
-        # feature_concated_1 = self.classifier_1(feature_concated_1)
-        feature_concated_2 = self.classifier_2(feature_concated_2)
-        feature_concated_3 = self.classifier_3(feature_concated_3)
-        feature_concated_4 = self.classifier_4(feature_concated_4)
-        
-        #out = torch.cat((feature_concated_2,feature_concated_3,feature_concated_4), dim=1)
+        # feature_concated_2 = torch.cat((out_liv2, out_spl2, out_kid2), dim=1) 
+        # feature_concated_3 = torch.cat((out_liv3, out_spl3, out_kid3), dim=1)
+        # feature_concated_4 = torch.cat((out_liv4, out_spl4, out_kid4), dim=1)
+        for organ in organ_list:
+            for fpn_layer in [2,3,4]:
+                key = f'out_{organ}{fpn_layer}'
+            # feature_concated_1 = feature_concated_1.view(feature_concated_1.size(0), -1)
+                outputs[key] = outputs[key].view(outputs[key].size(0), -1)
+            # feature_concated_3 = feature_concated_3.view(feature_concated_3.size(0), -1)
+            # feature_concated_4 = feature_concated_4.view(feature_concated_4.size(0), -1)
+            # 使用 getattr 動態獲取 classifier 方法
+                classifier = getattr(self, f'classifier_{fpn_layer}')
+            # 各自全連接分類結果
+            # feature_concated_1 = self.classifier_1(feature_concated_1)
+                outputs[f'feature_concated_{fpn_layer}'] = classifier(outputs[key])
+            # feature_concated_2 = self.classifier_2(feature_concated_2)
+            # feature_concated_3 = self.classifier_3(feature_concated_3)
+            # feature_concated_4 = self.classifier_4(feature_concated_4)
+            outputs[organ] = torch.cat((outputs["feature_concated_2"],outputs["feature_concated_3"],outputs["feature_concated_4"]), dim=1)
         
         #return out
         # return feature_concated_1, feature_concated_2, feature_concated_3, feature_concated_4
-        return feature_concated_2, feature_concated_3, feature_concated_4
+        return outputs
         
     def process_input(self, x):
         # x is a list of feature maps from DenseNet3D at different scales
@@ -368,7 +373,7 @@ class DenseNet3D_FPN(nn.Module):
     def forward(self, x1,x2,x3):
         features, features2, features3 = self.densenet3d(x1,x2,x3)  # 这将是一个特征图列表
         # fpn_layer1, fpn_layer2, fpn_layer3, fpn_layer4  = self.fpn(features, features2, features3)  # FPN3D 处理特征图列表
-        fpn_layer2, fpn_layer3, fpn_layer4  = self.fpn(features, features2, features3)
+        fpn_layer = self.fpn(features, features2, features3)
         # TODO concat 有問題，應該可以直接刪除
         if self.fpn_type == 'concat':
             # out_concat = torch.cat((fpn_layer1, fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
@@ -377,10 +382,10 @@ class DenseNet3D_FPN(nn.Module):
             return outputs
 
         elif self.fpn_type == 'split':
-            out_concat = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
-            output_liv = self.classifier(out_concat)
-            output_spl = self.classifier(out_concat)
-            output_kid = self.classifier(out_concat)
+            #out_concat = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
+            output_liv = self.classifier(fpn_layer['liv'])
+            output_spl = self.classifier(fpn_layer['spl'])
+            output_kid = self.classifier(fpn_layer['kid'])
             return output_liv, output_spl, output_kid
 
         elif self.fpn_type == 'indivudial':
