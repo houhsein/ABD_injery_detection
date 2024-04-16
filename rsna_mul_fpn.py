@@ -399,7 +399,7 @@ if __name__ == '__main__':
     # kidney_neg = kidney_neg.drop_duplicates(subset=['chartNo'],keep='first')
     # kidney_neg['Right_check'] = '0'
     # kidney_neg['Left_check'] = '0'
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     # Data progressing
     All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
     pos_data = All_data[All_data['any_injury']==1]
@@ -410,7 +410,7 @@ if __name__ == '__main__':
     All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
     All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 
-    df_all = All_data[:100]
+    df_all = All_data
     # if bbox and attention_mask:
         # raise ValueError("Only one of 'bbox' and 'attention_mask' can be selected as True.")
 

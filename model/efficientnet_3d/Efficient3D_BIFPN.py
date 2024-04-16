@@ -2,7 +2,7 @@ from model.BiFPN.bifpn import BiFPN
 from .model_3d import EfficientNet3D
 import torch
 import torch.nn as nn
-
+from ..BiFPN.utils import LSEPooling3dStaticSamePadding
 '''
 https://github.com/tristandb/EfficientDet-PyTorch
 https://github.com/zylo117/Yet-Another-EfficientDet-Pytorch
@@ -67,9 +67,13 @@ class BiFPN_3_input(nn.Module):
             # nn.Linear(512, num_classes)
             nn.Linear(64*2*2*2, num_classes)
         )
+        self.upsample = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
+        self.downsample = nn.
 
     def forward(self, x1, x2, x3):
         outputs = {}
+        outputs_tmp = {}
+        outputs_final = {}
         outputs["out_liv3"], outputs["out_liv4"], outputs["out_liv5"], outputs["out_liv6"] = self.bifpn(x1)
         outputs["out_spl3"], outputs["out_spl4"], outputs["out_spl5"], outputs["out_spl6"] = self.bifpn(x2)
         outputs["out_kid3"], outputs["out_kid4"], outputs["out_kid5"], outputs["out_kid6"] = self.bifpn(x3)
@@ -82,8 +86,22 @@ class BiFPN_3_input(nn.Module):
                     # 使用 getattr 動態獲取 classifier 方法
                     classifier = getattr(self, f'classifier_{fpn_layer}')
                     outputs[f'feature_concated_{fpn_layer}'] = classifier(outputs[key])
-                outputs[organ] = torch.cat((outputs["feature_concated_3"],outputs["feature_concated_4"],outputs["feature_concated_5"],outputs["feature_concated_6"]), dim=1)
-        return outputs
+                outputs_final[organ] = torch.cat((outputs["feature_concated_3"],outputs["feature_concated_4"],outputs["feature_concated_5"],outputs["feature_concated_6"]), dim=1)
+        elif self.fpn_type == 'feature_concat':
+            # feature size: 16, 8, 4, 2
+            
+            
+        elif self.fpn_type == 'split':
+            for organ in organ_list:
+                for fpn_layer in [3,4,5,6]:
+                    key = f'out_{organ}{fpn_layer}'
+                    outputs[key] = outputs[key].view(outputs[key].size(0), -1)
+                    # 使用 getattr 動態獲取 classifier 方法
+                    classifier = getattr(self, f'classifier_{fpn_layer}')
+                    outputs_tmp[f'feature_concated_{fpn_layer}'] = classifier(outputs[key])
+                outputs_final[organ] = outputs_tmp
+
+        return outputs_final
 
 
 class EfficientNet3D_BiFPN(nn.Module):
