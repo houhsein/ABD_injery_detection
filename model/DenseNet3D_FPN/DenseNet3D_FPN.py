@@ -362,11 +362,11 @@ class FPN3D(nn.Module):
         return x2, x3, x4
                           
 class DenseNet3D_FPN(nn.Module):
-    def __init__(self, n_input_channels=4, dropout=0.2, class_num=9, fpn_type='concat'):
+    def __init__(self, num_init_features, n_input_channels=4, dropout=0.2, class_num=9, fpn_type='label_concat'):
         super(DenseNet3D_FPN, self).__init__()
         self.fpn_type = fpn_type
-        self.densenet3d = DenseNet3D()
-        self.fpn = FPN3D(input_channels=[256, 512, 1024, 1024], output_channels=256, dropout=0.2, class_num=class_num)
+        self.densenet3d = DenseNet3D(num_init_features = num_init_features)
+        self.fpn = FPN3D(input_channels=[24, 40, 112, 1280], output_channels=256, dropout=0.2, class_num=class_num)
         # class_num * FPN layer層數
         self.classifier = nn.Linear(class_num*3, class_num)
 
@@ -381,7 +381,7 @@ class DenseNet3D_FPN(nn.Module):
             outputs = self.classifier(out_concat)
             return outputs
 
-        elif self.fpn_type == 'split':
+        elif self.fpn_type == 'label_concat':
             #out_concat = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
             output_liv = self.classifier(fpn_layer['liv'])
             output_spl = self.classifier(fpn_layer['spl'])

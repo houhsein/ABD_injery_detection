@@ -563,8 +563,14 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                 # FPN layer 各自算loss
                 # TODO concat 需要修改 不能直接用softmax
                 if fpn_type == 'split':
-                    outputs = model(input_liv, input_spl, input_kid)
-                    # outputs = F.sigmoid(outputs)
+                    out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
+                    label_kid = labels[:,0:3]
+                    label_liv = labels[:,3:6]
+                    label_spl = labels[:,6:9]
+                    # for organ in ['liv','spl','kid']:
+                    #     for fpn_layer in [3,4,5,6]:
+                    #         eval(f"loss_{fpn_layer}") = loss_functions(eval(f"out_{organ}")[f'feature_concated_{fpn_layer}'])
+                    #     eval(f"loss_{organ}") = loss_3 + loss_4 + loss_5 + loss_6 
                     loss = loss_function(outputs, labels[:-1])
                     # train accuracy
                     outputs = F.softmax(outputs, dim=1)
@@ -587,10 +593,18 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                     loss = loss_l + loss_s + loss_k
                     # train accuracy
                     train_outputs = [F.softmax(tensor, dim=1) for tensor in [out_liv, out_spl, out_kid]]
+                    predict_list = []
+                    for tensor in train_outputs:
+                        _, max_indices = torch.max(tensor, dim=1)
+                        output_tmp = torch.zeros_like(tensor)
+                        for i in range(tensor.size(0)):  # 遍历所有行
+                            output_tmp[i, max_indices[i]] = 1
+                        predict_list.append(output_tmp)
                     # kidney, liver, spleen
-                    train_outputs = torch.cat((train_outputs[2], train_outputs[0], train_outputs[1]), dim=1)
-                    binary_predictions = (train_outputs > 0.5).float()
-                    for prediction, ground_truth in zip(binary_predictions, labels[:,:-1]):
+                    predict = torch.cat((predict_list[2], predict_list[0], predict_list[1]), dim=1)
+                    # kidney, liver, spleen
+                    # train_outputs = torch.cat((train_outputs[2], train_outputs[0], train_outputs[1]), dim=1)
+                    for prediction, ground_truth in zip(predict, labels[:,:-1]):
                         for part, (start_idx, end_idx) in index_ranges.items():
                             accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
                             total_train_acc[part] += accuracy
@@ -856,9 +870,18 @@ def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
             # 確認output是否為器官預測分開的結果
             if isinstance(val_outputs, tuple):
                 val_outputs = [F.softmax(tensor, dim=1) for tensor in val_outputs]
+                predict_list = []
+                for tensor in val_outputs:
+                    _, max_indices = torch.max(tensor, dim=1)
+                    output_tmp = torch.zeros_like(tensor)
+                    for i in range(tensor.size(0)):  # 遍历所有行
+                        output_tmp[i, max_indices[i]] = 1
+                    predict_list.append(output_tmp)
                 # kidney, liver, spleen
+                predict = torch.cat((predict_list[2], predict_list[0], predict_list[1]), dim=1)
                 val_outputs = torch.cat((val_outputs[2], val_outputs[0], val_outputs[1]), dim=1)
             else:
+                #TODO 定義不同了
                 val_outputs = F.softmax(val_outputs, dim=1)
             # RSNA score 
             # log loss需要全部一起看，先建立df
@@ -867,16 +890,15 @@ def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
             rsna_solution_df = pd.concat([rsna_solution_df, sol_tmp], ignore_index=True)
             rsna_submission_df = pd.concat([rsna_submission_df, sub_tmp], ignore_index=True)
             # 根據每個標籤預測正確的比例
-            binary_predictions = (val_outputs > 0.5).float()
-            for prediction, ground_truth in zip(binary_predictions, val_labels[:,:-1]):
+            for prediction, ground_truth in zip(predict, val_labels[:,:-1]):
                 for part, (start_idx, end_idx) in index_ranges.items():
                     accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
                     total_acc[part] += accuracy
                 num_acc += 1
             # 計算標籤完全正確的比例
             val_labels = val_labels[:,:-1].cpu().numpy()
-            binary_predictions = binary_predictions.cpu().numpy()
-            score = accuracy_score(val_labels, binary_predictions)
+            predict = predict.cpu().numpy()
+            score = accuracy_score(val_labels, predict)
             total_score += score
             total_labels += 1
         # transfer df to numeric

@@ -5,7 +5,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 from torch.autograd import Variable
-from sklearn.metrics import roc_curve, auc
+import torch.nn.functional as F
+from utils.training_torch_utils import(
+    calculate_multi_label_accuracy,
+    rsna_score_cal
+)
+from sklearn.metrics import roc_curve, auc, accuracy_score, log_loss
 from torch import nn
 import os
 from sklearn import metrics
@@ -91,6 +96,77 @@ def test(model, testLoader, device):
         print("Test Accuracy: {}".format(num_correct / metric_count))
         return (predict_values)
 
+def test_mul_fpn(model, testLoader, device):
+    pre_first = True
+    model.eval()
+    with torch.no_grad():
+        num_acc = 0
+        metric_count = 0
+        total_labels = 0
+        total_score = 0.0
+        total_acc = {"kid": 0, "liv": 0, "spl": 0}
+        index_ranges = {"kid": (0, 3), "liv": (3, 6), "spl": (6, 9)}
+        column_names_sol = ['kidney_healthy', 'kidney_low', 'kidney_high',
+                        'liver_healthy', 'liver_low', 'liver_high',
+                        'spleen_healthy', 'spleen_low', 'spleen_high','any_injury']
+        # submit any_injury col is generate in rsna_score_cal
+        column_names_sub = ['kidney_healthy', 'kidney_low', 'kidney_high',
+                        'liver_healthy', 'liver_low', 'liver_high',
+                        'spleen_healthy', 'spleen_low', 'spleen_high']
+        rsna_solution_df = pd.DataFrame(columns=column_names_sol)
+        rsna_submission_df = pd.DataFrame(columns=column_names_sub)
+
+        for testdata in testLoader:
+            input_liv, input_spl, input_kid_r, input_kid_l = testdata['image_liv'].to(device), testdata['image_spl'].to(device), \
+                                                testdata['image_kid_r'].to(device), testdata['image_kid_l'].to(device)
+            test_labels = testdata['label'].to(device)
+            input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
+            output = model(input_liv, input_spl, input_kid)
+            outputs = [F.softmax(tensor, dim=1) for tensor in output]
+            predict_list = []
+            for tensor in outputs:
+                _, max_indices = torch.max(tensor, dim=1)
+                output_tmp = torch.zeros_like(tensor)
+                for i in range(tensor.size(0)):  # 遍历所有行
+                    output_tmp[i, max_indices[i]] = 1
+                predict_list.append(output_tmp)
+            # kidney, liver, spleen
+            predict = torch.cat((predict_list[2], predict_list[0], predict_list[1]), dim=1)
+            outputs = torch.cat((outputs[2], outputs[0], outputs[1]), dim=1).cpu().detach().numpy()
+            sol_tmp = pd.DataFrame(test_labels.cpu().numpy(), columns=column_names_sol)
+            sub_tmp = pd.DataFrame(outputs, columns=column_names_sub)
+            rsna_solution_df = pd.concat([rsna_solution_df, sol_tmp], ignore_index=True)
+            rsna_submission_df = pd.concat([rsna_submission_df, sub_tmp], ignore_index=True)
+            # 根據每個標籤預測正確的比例
+            for prediction, ground_truth in zip(predict, test_labels[:,:-1]):
+                for part, (start_idx, end_idx) in index_ranges.items():
+                    accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
+                    total_acc[part] += accuracy
+                num_acc += 1
+            # 計算標籤完全正確的比例
+            test_labels = test_labels[:,:-1].cpu().numpy()
+            predict = predict.cpu().numpy()
+            score = accuracy_score(test_labels, predict)
+            total_score += score
+            total_labels += 1
+            if pre_first:
+                pre_first = None
+                predict_values = outputs
+            else:
+                predict_values = np.concatenate((predict_values, outputs),axis=0)
+        # transfer df to numeric
+        rsna_solution_df[column_names_sol] = rsna_solution_df[column_names_sol].apply(pd.to_numeric)
+        rsna_submission_df[column_names_sub] = rsna_submission_df[column_names_sub].apply(pd.to_numeric)
+        rsna_score = rsna_score_cal(rsna_solution_df, rsna_submission_df)
+        metric = {part: acc / num_acc for part, acc in total_acc.items()}
+        score = total_score / total_labels
+        
+        print(f'Test kid acc:{metric["kid"]}, liv acc:{metric["liv"]}, spl acc:{metric["spl"]}',flush =True)
+        print(f'Test total acc:{score}',flush =True)
+        print(f'Test rsna:{rsna_score}',flush =True)
+
+        return (predict_values)
+
 # inference 
 def inference(model, testLoader, device):
     pre_first = True
@@ -131,8 +207,6 @@ def plot_confusion_matrix(cm, classes,
     else:
         print('Confusion matrix, without normalization')
 
-    print(cm)
-
     plt.imshow(cm, interpolation='nearest', cmap=cmap)
     plt.title(title)
     plt.colorbar()
@@ -147,8 +221,7 @@ def plot_confusion_matrix(cm, classes,
             plt.text(j, i, format(cm[i, j], fmt),
                  horizontalalignment="center",
                  fontsize =14,
-                 color="white" if i==j else "black")
-    #             color="white" if cm[i, j] > thresh else "black")
+                 color="white" if cm[i, j] > thresh else "black")
 
     plt.ylabel('True label')
     plt.xlabel('Predicted label')
