@@ -26,7 +26,7 @@ import sys
 sys.path.append("/tf/jacky831006/ABD_classification/model/")
 from efficientnet_3d.model_3d import EfficientNet3D
 from efficientnet_3d.Efficient3D_BIFPN import EfficientNet3D_BiFPN, EfficientNet3D_FPN
-from resnet_3d import Resnet3D_3_input
+from resnet_3d.resnet_3d_new import Resnet3D_3_input
 from DenseNet3D_FPN import DenseNet3D_FPN
 # 此架構參考這篇
 # https://github.com/fei-aiart/NAS-Lung
@@ -232,7 +232,7 @@ def run_once(times=0):
         model = nn.DataParallel(model).to(device)
     else:
         if architecture == 'resnet':
-            pass
+            model.to(device)
             # model = model.to(device)
             # model = nn.DataParallel(model, device_ids=None)
             # net_dict = model.state_dict()

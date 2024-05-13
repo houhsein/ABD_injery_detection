@@ -376,14 +376,16 @@ class Resnet3D_3_input(nn.Module):
         self.load_weights()
         # 接 FPN 才需要 
         # Modify ResNet architecture
-        # self.resnet.layer4 = nn.Identity()
-        # self.resnet.conv_seg = nn.Identity()
+        self.resnet.conv_seg = nn.Identity()
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.classifier = nn.Linear(2048, num_classes)
 
     def load_weights(self):
         # Path to the pre-trained weights
         load_weight_path = '/tf/jacky831006/ABD_classification/pretrain_weight/resnet_101.pth'
         self.resnet.to(self.device)
         net_dict = self.resnet.state_dict()
+        pretrain = torch.load(load_weight_path)
         pretrain_dict = {k: v for k, v in pretrain['state_dict'].items() if k in net_dict.keys()}
         net_dict.update(pretrain_dict)
         self.resnet.load_state_dict(net_dict)
@@ -398,5 +400,8 @@ class Resnet3D_3_input(nn.Module):
     def process_input(self, x):
         # 使用EfficientNet处理输入
         x = self.resnet(x)
+        x = self.avg_pool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
         return x
 
