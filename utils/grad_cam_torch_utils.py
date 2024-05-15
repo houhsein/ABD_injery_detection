@@ -311,6 +311,73 @@ def get_roc_CI(y_true, y_score):
     tprs_lower = np.maximum(mean_tpr - 1.96 * std_tpr, 0)
     return roc_curves, auc_scores, mean_fpr, tprs_lower, tprs_upper
 
+
+def find_import_label(lst, tmp_pre):
+    # 從high , low ,healthy依序確認，有過閾值就為標記
+    # 若全部都沒過，則選最大值
+    for i in range(len(lst) - 1, -1, -1):
+        if lst[i] == 1:
+            return i
+    return np.argmax(tmp_pre) 
+
+def multi_label_progress(arr, index_ranges, optimal_th_list=False):
+    out_lst = []
+    for i in range(arr.shape[0]):
+        one_list = []
+        for cls_type in ['kid','liv','spl']:
+            if optimal_th_list:
+                tmp_pre = arr[i][index_ranges[cls_type][0]:index_ranges[cls_type][1]]
+                tmp_th = optimal_th_list[index_ranges[cls_type][0]//3]
+                result = [1 if a > b else 0 for a, b in zip(tmp_pre, tmp_th)]
+                one_list.append(find_import_label(result,tmp_pre))
+            else:
+                tmp_pre = arr[i][index_ranges[cls_type][0]:index_ranges[cls_type][1]]
+                one_list.append(np.argmax(tmp_pre))
+        out_lst.append(one_list)
+    return out_lst
+
+def plot_multi_class_roc(y_pre, y_label, n_classes, cls_type, dir_path, file_name):
+    fig = plt.figure(figsize=(6, 6))
+    lw = 2
+    y_label = np.array(y_label)
+    y_pre = np.array(y_pre)
+    optimal_th_list = []
+    # 計算每個類別的 ROC 曲線和 AUC
+    for i in range(n_classes):
+        # 將當前類別視為正類，其他所有類別視為負類
+        y_true_binary = np.where(y_label == i, 1, 0)
+        y_pre_binary = y_pre[:,i]
+        fpr, tpr, _ = roc_curve(y_true_binary, y_pre_binary)
+        roc_auc = auc(fpr, tpr)
+        optimal_th, optimal_point = Find_Optimal_Cutoff(y_true_binary, y_pre_binary)
+        optimal_th_list.append(optimal_th)
+        roc_curves, auc_scores, mean_fpr, tprs_lower, tprs_upper = get_roc_CI(y_true_binary, y_pre_binary)
+
+        # plt.plot(fpr, tpr, label=f'Class {i} (area = {roc_auc:.2f})')
+        conf_int = ' ({:.3f}-{:.3f})'.format(np.percentile(auc_scores, 2.5), np.percentile(auc_scores, 97.5))
+        plot_label = f'Class {i} AUC:{roc_auc:.3f}\n95% CI, {conf_int}'
+        plt.plot(fpr, tpr, lw=lw, label=plot_label)
+        plt.plot(optimal_point[0], optimal_point[1], marker = 'o', color='r')
+        plt.text(optimal_point[0], optimal_point[1], f'Class {i} Threshold:{optimal_th:.3f}')
+        plt.fill_between(mean_fpr, tprs_lower, tprs_upper, alpha=.1, color='b')
+        
+    ticks = np.linspace(0, 1, 11)
+    plt.xticks(ticks)
+    plt.yticks(ticks)
+    plt.plot([0, 1], [0, 1], color='gray', lw=lw, linestyle='--')
+    plt.xlim([-0.05, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.grid()
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC-AUC of {cls_type} for each class')
+    plt.legend(loc="lower right")
+    fig.savefig(f"{dir_path}/{file_name}_{cls_type}_roc.png")
+    plt.close()
+    # plt.show()
+
+    return optimal_th_list
+
 def plot_roc(y_pre, y_label, dir_path, file_name):
     scores = list()
     # 正樣本的數值輸出

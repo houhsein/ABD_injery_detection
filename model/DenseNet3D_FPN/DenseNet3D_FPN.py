@@ -366,7 +366,7 @@ class DenseNet3D_FPN(nn.Module):
         super(DenseNet3D_FPN, self).__init__()
         self.fpn_type = fpn_type
         self.densenet3d = DenseNet3D(num_init_features = num_init_features)
-        self.fpn = FPN3D(input_channels=[24, 40, 112, 1280], output_channels=256, dropout=0.2, class_num=class_num)
+        self.fpn = FPN3D(input_channels=[256, 512, 1024, 1024], output_channels=256, dropout=0.2, class_num=class_num)
         # class_num * FPN layer層數
         self.classifier = nn.Linear(class_num*3, class_num)
 

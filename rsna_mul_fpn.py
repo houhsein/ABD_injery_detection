@@ -431,7 +431,7 @@ if __name__ == '__main__':
     # Data progressing
     All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
     pos_data = All_data[All_data['any_injury']==1]
-    neg_data = All_data[All_data['any_injury']==0].sample(n=300, random_state=seed)
+    neg_data = All_data[All_data['any_injury']==0].sample(n=len(pos_data), random_state=seed)
     All_data = pd.concat([pos_data, neg_data])
     no_seg_kid = pd.read_csv("/SSD/rsna-2023/nosegmentation_kid.csv")
     no_seg = pd.read_csv("/SSD/rsna-2023/nosegmentation.csv")
