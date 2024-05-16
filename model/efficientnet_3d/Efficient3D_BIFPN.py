@@ -8,10 +8,10 @@ https://github.com/tristandb/EfficientDet-PyTorch
 https://github.com/zylo117/Yet-Another-EfficientDet-Pytorch
 '''
 class EfficientNet3D_3_input(nn.Module):
-    def __init__(self, structure_num, size, num_classes, normal=True):
+    def __init__(self, structure_num, size, num_classes, depth_coefficient, normal=True):
         super(EfficientNet3D_3_input, self).__init__()
         # num_classes不重要，都會重新取在linear前進行BiFPN
-        self.efficientnet = EfficientNet3D.from_name(f"efficientnet-{structure_num}", in_channels=1, num_classes=num_classes, image_size=size, normal=normal)
+        self.efficientnet = EfficientNet3D.from_name(f"efficientnet-{structure_num}", in_channels=1, num_classes=num_classes, image_size=size, normal=normal,  depth_coefficient=depth_coefficient)
 
     def forward(self, x1, x2, x3):
         # 对每个输入独立执行EfficientNet处理
@@ -105,10 +105,10 @@ class BiFPN_3_input(nn.Module):
 
 
 class EfficientNet3D_BiFPN(nn.Module):
-    def __init__(self, size, structure_num, class_num, dropout=0.2, fpn_type='label_concat', normal=True):
+    def __init__(self, size, structure_num, class_num, dropout=0.2, depth_coefficient=0.75, fpn_type='label_concat', normal=True):
         super(EfficientNet3D_BiFPN, self).__init__()
         self.fpn_type = fpn_type
-        self.efficientnet =  EfficientNet3D_3_input(structure_num, size, class_num, normal)
+        self.efficientnet =  EfficientNet3D_3_input(structure_num, size, class_num, normal, depth_coefficient)
         self.bifpn = BiFPN_3_input(num_classes=class_num, dropout=dropout, fpn_type=fpn_type)
         self.classifier = nn.Linear(class_num*4, class_num)
 
@@ -235,10 +235,10 @@ class FPN3D(nn.Module):
         return x2, x3, x4
 
 class EfficientNet3D_FPN(nn.Module):
-    def __init__(self, size, structure_num, class_num, fpn_type='label_concat', normal=True):
+    def __init__(self, size, structure_num, class_num, depth_coefficient=0.75, fpn_type='label_concat', normal=True):
         super(EfficientNet3D_FPN, self).__init__()
         self.fpn_type = fpn_type
-        self.efficientnet =  EfficientNet3D_3_input(structure_num, size, class_num, normal)
+        self.efficientnet =  EfficientNet3D_3_input(structure_num, size, class_num, normal, depth_coefficient)
         self.fpn = FPN3D(input_channels=[16, 24, 40, 112], output_channels=256, class_num=class_num)
         self.classifier = nn.Linear(class_num*3, class_num)
 

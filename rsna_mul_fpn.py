@@ -42,7 +42,8 @@ import json
 from utils.training_torch_utils import(
     train_mul_fpn, 
     valid_mul_fpn, 
-    plot_loss_metric
+    plot_loss_metric,
+    FocalLoss
 )
 import pickle
 # Data augmnetation module (based on MONAI)
@@ -211,11 +212,11 @@ def run_once(times=0):
     elif architecture == 'efficientnet':
         if fpn_type == 'label_concat':
             # model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
-            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type)
+            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
         elif fpn_type == 'split':
-            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
         elif fpn_type == 'feature_concat':
-            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
     elif architecture == 'resnet':
         if fpn_type == 'label_concat':
             model = Resnet3D_3_input(size=size, num_classes=3, device=device)
@@ -264,7 +265,10 @@ def run_once(times=0):
     # else:
     #     weights = [1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
     #     class_weights = torch.FloatTensor(weights).to(device)
-    loss_function = nn.CrossEntropyLoss(weight=class_weights)
+    if loss_type == 'crossentropy':
+        loss_function = nn.CrossEntropyLoss(weight=class_weights)
+    elif loss_type == 'focalloss':
+        loss_function = FocalLoss(alpha=0.25, gamma=2, use_softmax=True, weight=class_weights)
     # else:
     #     loss_function = nn.BCEWithLogitsLoss(reduction='mean')
 
@@ -368,6 +372,7 @@ if __name__ == '__main__':
     architecture = conf.get('Data_Setting','architecture')
     if architecture == 'efficientnet':
         structure_num = conf.get('Data_Setting', 'structure_num')
+        depth_coefficient = conf.getfloat('Data_Setting', 'depth_coefficient')
     gpu_num = conf.get('Data_Setting','gpu')
     seed = conf.getint('Data_Setting','seed')
     cross_kfold = conf.getint('Data_Setting','cross_kfold')
@@ -388,9 +393,10 @@ if __name__ == '__main__':
     lr_decay_epoch = conf.getint('Data_Setting','lr_decay_epoch')
     # whole, cropping_normal, cropping_convex, cropping_dilation
     # img_type = conf.get('Data_Setting','img_type')
-    # loss_type = conf.get('Data_Setting','loss')
+    loss_type = conf.get('Data_Setting','loss')
     fpn_type = conf.get('Data_Setting','fpn_type')
     eval_score = conf.get('Data_Setting','eval_score')
+
     # bbox = conf.getboolean('Data_Setting','bbox')
     # attention_mask = conf.getboolean('Data_Setting','attention_mask')
     # HU range: ex 0,100

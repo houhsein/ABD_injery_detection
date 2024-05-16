@@ -1084,7 +1084,7 @@ def Data_progressing(pos_file, neg_file, box_df, imbalance_data_ratio, data_spli
     return train_data_dicts, valid_data_dicts, test_data_dicts
 
 class FocalLoss(nn.Module):
-    def __init__(self, class_num, alpha=None, gamma=2, size_average=True, weight=None):
+    def __init__(self, use_softmax, alpha=None, gamma=2, size_average=True, weight=None):
         """
         focal_loss损失函数, -α(1-yi)**γ *ce_loss(xi,yi)      
         步骤详细的实现了 focal_loss损失函数.
@@ -1105,7 +1105,7 @@ class FocalLoss(nn.Module):
         #         self.alpha[1:] += (1-alpha)
         self.alpha = alpha
         self.gamma = gamma  # 指数
-        self.class_num = class_num  # 类别数目
+        # self.class_num = class_num  # 类别数目
         self.size_average = size_average  # 返回的loss是否需要mean一下
         self.weight = weight
         self.use_softmax = use_softmax
@@ -1120,54 +1120,52 @@ class FocalLoss(nn.Module):
         # assert preds.dim()==2 and labels.dim()==1        
         preds = preds.view(-1,preds.size(-1))        
         if self.use_softmax:
-            loss = softmax_focal_loss(preds, labels, self.gamma, self.alpha)
+            loss = self.softmax_focal_loss(preds, labels, self.gamma, self.alpha)
         else:
-            loss = sigmoid_focal_loss(preds, labels, self.gamma, self.alpha)
+            loss = self.sigmoid_focal_loss(preds, labels, self.gamma, self.alpha)
 
         if self.weight is not None:
-            class_weight: Optional[torch.Tensor] = None
-            num_of_classes = labels.shape[1]
-            # 對損失進行加權
-            if isinstance(self.weight, (float, int)):
-                class_weight = torch.as_tensor([self.weight] * num_of_classes)
-            else:
-                class_weight = torch.as_tensor(self.weight)
-                        # apply class_weight to loss
-            class_weight = class_weight.to(loss)
-            broadcast_dims = [-1] + [1] * len(labels.shape[2:])
+            class_weight = torch.as_tensor(self.weight).to(loss)
+            broadcast_dims = [-1] + [1] * len(labels.shape[2:]) 
             class_weight = class_weight.view(broadcast_dims)
             loss = class_weight * loss
 
         if self.size_average:        
             loss = loss.mean()        
         else:
-            loss = loss.mean(dim=list(range(2, len(labels.shape))))            
+            # loss = loss.mean(dim=list(range(2, len(labels.shape))))            
             loss = loss.sum()        
         
         return loss
     
-    def softmax_focal_loss(preds: torch.Tensor, labels: torch.Tensor, gamma: float = 2.0, alpha: Optional[float] = None):
-        input_ls = preds.log_softmax(1)
-        loss= -(1 - input_ls.exp()).pow(gamma) * input_ls * labels
+    def softmax_focal_loss(self, preds: torch.Tensor, labels: torch.Tensor, gamma: float = 2.0, alpha: Optional[float] = None):
+        log_probs = F.log_softmax(preds, dim=-1)
+        probs = torch.exp(log_probs)
+        focal_weight = (1 - probs) ** gamma
+        loss = -focal_weight * log_probs * labels
 
         if alpha is not None:
             # (1-alpha) for the background class and alpha for the other classes
-            alpha_fac = torch.tensor([1 - alpha] + [alpha] * (labels.shape[1] - 1)).to(loss)
+            alpha_factor = torch.tensor([1 - alpha] + [alpha] * (labels.shape[1] - 1)).to(loss)
             broadcast_dims = [-1] + [1] * len(labels.shape[2:])
-            alpha_fac = alpha_fac.view(broadcast_dims)
-            loss = alpha_fac * loss
+            alpha_factor = alpha_factor.view(broadcast_dims)
+            loss = alpha_factor * loss
 
         return loss
 
-    def sigmoid_focal_loss(preds: torch.Tensor, labels: torch.Tensor, gamma: float = 2.0, alpha: Optional[float] = None):
+    def sigmoid_focal_loss(self, preds: torch.Tensor, labels: torch.Tensor, gamma: float = 2.0, alpha: Optional[float] = None):
+        # max_val = (-preds).clamp(min=0)
+        preds = preds.view(-1)
+        labels = labels.view(-1)
         max_val = (-preds).clamp(min=0)
         loss= preds - preds * labels + max_val + ((-max_val).exp() + (-preds - max_val).exp()).log()
         invprobs = F.logsigmoid(-preds * (labels * 2 - 1))  # reduced chance of overflow
-        loss = (invprobs * gamma).exp() * loss
+        focal_weight = (invprobs * gamma).exp()
+        loss = focal_weight * log_probs
 
         if alpha is not None:
             # alpha if t==1; (1-alpha) if t==0
-            alpha_factor = target * alpha + (1 - target) * (1 - alpha)
+            alpha_factor = labels * alpha + (1 - labels) * (1 - alpha)
             loss = alpha_factor * loss
 
         return loss
