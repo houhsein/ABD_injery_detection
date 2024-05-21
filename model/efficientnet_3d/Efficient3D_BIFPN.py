@@ -139,9 +139,11 @@ class EfficientNet3D_BiFPN(nn.Module):
         return output_liv, output_spl, output_kid
 
 class FPN3D(nn.Module):
-    def __init__(self, input_channels, output_channels, class_num):
+    def __init__(self, input_channels, output_channels, class_num, fpn_type, normalize=False):
         super(FPN3D, self).__init__()
         self.output_channels = output_channels
+        self.normalize = normalize
+        self.fpn_type = fpn_type
         self.conv1 = nn.Conv3d(input_channels[0], output_channels, kernel_size=1)
         self.conv2 = nn.Conv3d(input_channels[1], output_channels, kernel_size=1)
         self.conv3 = nn.Conv3d(input_channels[2], output_channels, kernel_size=1)
@@ -150,6 +152,7 @@ class FPN3D(nn.Module):
         self.smooth = nn.Conv3d(output_channels, output_channels, kernel_size=3, stride=1, padding=1)
         self.avg_pool = nn.AdaptiveAvgPool3d(1)
         self.classifier = nn.Linear(output_channels, class_num)
+        self.feature_cat_classifier = nn.Linear(output_channels*3, class_num)
         # self.classifier_4 = nn.Sequential(
         #     nn.Linear(256*2*2*2, 1000), 
         #     nn.Linear(1000, 512), 
@@ -190,24 +193,44 @@ class FPN3D(nn.Module):
         # feature_concated_2 = torch.cat((out_liv2, out_spl2, out_kid2), dim=1) 
         # feature_concated_3 = torch.cat((out_liv3, out_spl3, out_kid3), dim=1)
         # feature_concated_4 = torch.cat((out_liv4, out_spl4, out_kid4), dim=1)
-        for organ in organ_list:
-            for fpn_layer in [2,3,4]:
-                key = f'out_{organ}{fpn_layer}'
-                # outputs[key] = outputs[key].view(outputs[key].size(0), -1)
-            # 使用 getattr 動態獲取 classifier 方法
-                # classifier = getattr(self, f'classifier_{fpn_layer}')
-            # 各自全連接分類結果
-            # feature_concated_1 = self.classifier_1(feature_concated_1)
-                # outputs[f'feature_concated_{fpn_layer}'] = classifier(outputs[key])
-                outputs[key] = self.avg_pool(outputs[key])
-                outputs[key] = torch.flatten(outputs[key], 1)
-                outputs[f'feature_concated_{fpn_layer}'] = self.classifier(outputs[key])
-            outputs[organ] = torch.cat((outputs["feature_concated_2"],outputs["feature_concated_3"],outputs["feature_concated_4"]), dim=1)
-        
+        if self.fpn_type == 'label_concat':
+            for organ in organ_list:
+                for fpn_layer in [2,3,4]:
+                    key = f'out_{organ}{fpn_layer}'
+                    # outputs[key] = outputs[key].view(outputs[key].size(0), -1)
+                # 使用 getattr 動態獲取 classifier 方法
+                    # classifier = getattr(self, f'classifier_{fpn_layer}')
+                # 各自全連接分類結果
+                # feature_concated_1 = self.classifier_1(feature_concated_1)
+                    # outputs[f'feature_concated_{fpn_layer}'] = classifier(outputs[key])
+                    if self.normalize:
+                        outputs[key] = self.normalize_features(outputs[key])
+                    outputs[key] = self.avg_pool(outputs[key])
+                    outputs[key] = torch.flatten(outputs[key], 1)
+                    outputs[f'feature_concated_{fpn_layer}'] = self.classifier(outputs[key])
+                outputs[organ] = torch.cat((outputs["feature_concated_2"],outputs["feature_concated_3"],outputs["feature_concated_4"]), dim=1)
+        elif self.fpn_type == 'feature_concat':
+            # 將展平的特徵圖先cat再分類
+            for organ in organ_list:
+                pooled_features = []
+                for fpn_layer in [2,3,4]:
+                    key = f'out_{organ}{fpn_layer}'
+                    if self.normalize:
+                        outputs[key] = self.normalize_features(outputs[key])
+                    outputs[key] = self.avg_pool(outputs[key])
+                    outputs[key] = torch.flatten(outputs[key], 1)
+                    pooled_features.append(outputs[key])
+                concatenated_features = torch.cat(pooled_features, dim=1)
+                outputs[organ] = self.feature_cat_classifier(concatenated_features) 
         #return out
         # return feature_concated_1, feature_concated_2, feature_concated_3, feature_concated_4
         return outputs
-        
+
+    def normalize_features(self, features):
+        mean = features.mean(dim=[2, 3, 4], keepdim=True)
+        std = features.std(dim=[2, 3, 4], keepdim=True)
+        return (features - mean) / (std + 1e-5)
+
     def process_input(self, x):
         # x is a list of feature maps from efficientnet at different scales
         x2, x3, x4 = x
@@ -235,11 +258,11 @@ class FPN3D(nn.Module):
         return x2, x3, x4
 
 class EfficientNet3D_FPN(nn.Module):
-    def __init__(self, size, structure_num, class_num, depth_coefficient=0.75, fpn_type='label_concat', normal=True):
+    def __init__(self, size, structure_num, class_num, depth_coefficient=0.75, fpn_type='label_concat', normal=True, normalize=False):
         super(EfficientNet3D_FPN, self).__init__()
         self.fpn_type = fpn_type
         self.efficientnet =  EfficientNet3D_3_input(structure_num, size, class_num, normal, depth_coefficient)
-        self.fpn = FPN3D(input_channels=[16, 24, 40, 112], output_channels=256, class_num=class_num)
+        self.fpn = FPN3D(input_channels=[16, 24, 40, 112], output_channels=256, class_num=class_num, normalize=normalize, fpn_type=fpn_type)
         self.classifier = nn.Linear(class_num*3, class_num)
 
     def forward(self, x1,x2,x3):
@@ -254,10 +277,13 @@ class EfficientNet3D_FPN(nn.Module):
             output_liv = self.classifier(fpn_layer['liv'])
             output_spl = self.classifier(fpn_layer['spl'])
             output_kid = self.classifier(fpn_layer['kid'])
+
         elif self.fpn_type == 'feature_concat':
-            # feature size: 16, 8, 4, 2
-            pass
-            
+            fpn_layer = self.fpn(liv, spl, kid)
+            output_liv = fpn_layer['liv']
+            output_spl = fpn_layer['spl']
+            output_kid = fpn_layer['kid']
+
         elif self.fpn_type == 'split':
             # 3,4,5,6 layer mutiple output
             fpn_layer = self.fpn(liv, spl, kid)

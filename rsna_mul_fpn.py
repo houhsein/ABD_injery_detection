@@ -212,11 +212,12 @@ def run_once(times=0):
     elif architecture == 'efficientnet':
         if fpn_type == 'label_concat':
             # model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
-            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
+            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, normalize=False)
         elif fpn_type == 'split':
             model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
         elif fpn_type == 'feature_concat':
-            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
+            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, normalize=False)
+            # model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
     elif architecture == 'resnet':
         if fpn_type == 'label_concat':
             model = Resnet3D_3_input(size=size, num_classes=3, device=device)
@@ -310,7 +311,7 @@ def run_once(times=0):
     
    
     test_model = train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
-                        val_loader, early_stop, scheduler, check_path, fpn_type, eval_score)
+                        val_loader, early_stop, scheduler, check_path, fpn_type, eval_score, use_amp)
                     
     # plot train loss and metric 
     plot_loss_metric(config.epoch_loss_values, config.metric_values, check_path)
@@ -396,6 +397,7 @@ if __name__ == '__main__':
     loss_type = conf.get('Data_Setting','loss')
     fpn_type = conf.get('Data_Setting','fpn_type')
     eval_score = conf.get('Data_Setting','eval_score')
+    use_amp = conf.getboolean('Data_Setting','use_amp')
 
     # bbox = conf.getboolean('Data_Setting','bbox')
     # attention_mask = conf.getboolean('Data_Setting','attention_mask')
@@ -438,6 +440,7 @@ if __name__ == '__main__':
     All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
     pos_data = All_data[All_data['any_injury']==1]
     neg_data = All_data[All_data['any_injury']==0].sample(n=len(pos_data), random_state=seed)
+    # neg_data = All_data[All_data['any_injury']==0].sample(n=300, random_state=seed)
     All_data = pd.concat([pos_data, neg_data])
     no_seg_kid = pd.read_csv("/SSD/rsna-2023/nosegmentation_kid.csv")
     no_seg = pd.read_csv("/SSD/rsna-2023/nosegmentation.csv")

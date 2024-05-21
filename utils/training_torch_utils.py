@@ -520,7 +520,7 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
     return model
 
 def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, 
-    valid_loader, early_stop, scheduler, check_path, fpn_type='label_concat', eval_score='total_score'):
+    valid_loader, early_stop, scheduler, check_path, fpn_type='label_concat', eval_score='total_score', use_amp=False):
     # Let ini config file can be writted
     # fpn loss 分成 concat, softmax, individual
     best_metric_epoch = -1
@@ -535,8 +535,9 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         best_metric = -1
     #epoch_loss_values = list()
     # 混合精度學習
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     writer = SummaryWriter()
+
     for epoch in range(epochs):
         print("-" * 10)
         print(f"epoch {epoch + 1}/{epochs}")
@@ -550,6 +551,7 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         total_train_acc = {"kid": 0, "liv": 0, "spl": 0}
         index_ranges = {"kid": (0, 3), "liv": (3, 6), "spl": (6, 9)}
         first_start_time = time.time()
+
         for batch_data in train_loader:
             step += 1
             # kidney_healthy,kidney_low,kidney_high,liver_healthy,liver_low,liver_high,spleen_healthy,spleen_low,spleen_high,healthy
@@ -559,81 +561,22 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
             # TODO 可以思考怎麼合併kidney                              
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
-                # FPN layer 各自算loss
-                # TODO concat 需要修改 不能直接用softmax
-                if fpn_type == 'split':
-                    out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
-                    label_kid = labels[:,0:3]
-                    label_liv = labels[:,3:6]
-                    label_spl = labels[:,6:9]
-                    # for organ in ['liv','spl','kid']:
-                    #     for fpn_layer in [3,4,5,6]:
-                    #         eval(f"loss_{fpn_layer}") = loss_functions(eval(f"out_{organ}")[f'feature_concated_{fpn_layer}'])
-                    #     eval(f"loss_{organ}") = loss_3 + loss_4 + loss_5 + loss_6 
-                    loss = loss_function(outputs, labels[:-1])
-                    # train accuracy
-                    outputs = F.softmax(outputs, dim=1)
-                    binary_predictions = (outputs > 0.5).float()
-                    for prediction, ground_truth in zip(binary_predictions, labels[:,:-1]):
-                        for part, (start_idx, end_idx) in index_ranges.items():
-                            accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
-                            total_train_acc[part] += accuracy
-                        num_acc += 1
-                # FPN layer concate 分不同器官的結果
-                elif fpn_type == 'label_concat':
-                    out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
-                    # label分開
-                    label_kid = labels[:,0:3]
-                    label_liv = labels[:,3:6]
-                    label_spl = labels[:,6:9]
-                    loss_l = loss_function(out_liv, label_liv)
-                    loss_s = loss_function(out_spl, label_spl)
-                    loss_k = loss_function(out_kid, label_kid)
-                    loss = loss_l + loss_s + loss_k
-                    # train accuracy
-                    train_outputs = [F.softmax(tensor, dim=1) for tensor in [out_liv, out_spl, out_kid]]
-                    predict_list = []
-                    for tensor in train_outputs:
-                        _, max_indices = torch.max(tensor, dim=1)
-                        output_tmp = torch.zeros_like(tensor)
-                        for i in range(tensor.size(0)):  # 遍历所有行
-                            output_tmp[i, max_indices[i]] = 1
-                        predict_list.append(output_tmp)
-                    # kidney, liver, spleen
-                    predict = torch.cat((predict_list[2], predict_list[0], predict_list[1]), dim=1)
-                    # kidney, liver, spleen
-                    # train_outputs = torch.cat((train_outputs[2], train_outputs[0], train_outputs[1]), dim=1)
-                    for prediction, ground_truth in zip(predict, labels[:,:-1]):
-                        for part, (start_idx, end_idx) in index_ranges.items():
-                            accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
-                            total_train_acc[part] += accuracy
-                        num_acc += 1
-                # 各FPN layer resize並concat成一個feature map
-                # TODO individual 需要修改 不能直接用softmax
-                elif fpn_type == 'feature_concat':
-                    fpn_layer2, fpn_layer3, fpn_layer4 = model(input_liv, input_spl, input_kid)
-                    loss_2 = loss_function(fpn_layer2, labels)
-                    loss_3 = loss_function(fpn_layer3, labels)
-                    loss_4 = loss_function(fpn_layer4, labels)
-                    loss = loss_2 + loss_3 + loss_4
-                    # train accuracy
-                    train_outputs = [F.softmax(tensor, dim=1) for tensor in [fpn_layer2, fpn_layer3, fpn_layer4]]
-                    # kidney, liver, spleen
-                    train_outputs = torch.cat((train_outputs[2], train_outputs[0], train_outputs[1]), dim=1)
-                    outputs = torch.cat((fpn_layer2, fpn_layer3, fpn_layer4), dim=1)
-                    outputs = F.softmax(outputs, dim=1)
-                    binary_predictions = (outputs > 0.5).float()
-                    for prediction, ground_truth in zip(binary_predictions, labels[:,:-1]):
-                        for part, (start_idx, end_idx) in index_ranges.items():
-                            accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
-                            total_train_acc[part] += accuracy
-                        num_acc += 1
-            # loss.backward()
-            # optimizer.step()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                     loss, total_train_acc, num_acc = forward_pass(
+                        model, input_liv, input_spl, input_kid, labels, loss_function, fpn_type, total_train_acc, index_ranges, num_acc
+                    )
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss, total_train_acc, num_acc = forward_pass(
+                        model, input_liv, input_spl, input_kid, labels, loss_function, fpn_type, total_train_acc, index_ranges, num_acc
+                    )
+                loss.backward()
+                optimizer.step()
+
             epoch_loss += loss.item()
             epoch_len = data_num // train_loader.batch_size
             print(f"{step}/{epoch_len}, train_loss: {loss.item():.4f}")
@@ -687,6 +630,45 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
     #print(f'training_torch config.best_metric:{config.best_metric}',flush =True)
     return model
 
+def forward_pass(model, input_liv, input_spl, input_kid, labels, loss_function, fpn_type, total_train_acc, index_ranges, num_acc):
+    if fpn_type == 'split':
+    # TODO 算法有問題，但目前沒有要split
+        out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
+        label_kid = labels[:, 0:3]
+        label_liv = labels[:, 3:6]
+        label_spl = labels[:, 6:9]
+        loss = loss_function(outputs, labels[:-1])
+        outputs = F.softmax(outputs, dim=1)
+        binary_predictions = (outputs > 0.5).float()
+        for prediction, ground_truth in zip(binary_predictions, labels[:, :-1]):
+            for part, (start_idx, end_idx) in index_ranges.items():
+                accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
+                total_train_acc[part] += accuracy
+            num_acc += 1
+    elif fpn_type == 'label_concat' or 'feature_concat':
+        out_liv, out_spl, out_kid = model(input_liv, input_spl, input_kid)
+        label_kid = labels[:, 0:3]
+        label_liv = labels[:, 3:6]
+        label_spl = labels[:, 6:9]
+        loss_l = loss_function(out_liv, label_liv)
+        loss_s = loss_function(out_spl, label_spl)
+        loss_k = loss_function(out_kid, label_kid)
+        loss = loss_l + loss_s + loss_k
+        train_outputs = [F.softmax(tensor, dim=1) for tensor in [out_liv, out_spl, out_kid]]
+        predict_list = []
+        for tensor in train_outputs:
+            _, max_indices = torch.max(tensor, dim=1)
+            output_tmp = torch.zeros_like(tensor)
+            for i in range(tensor.size(0)):
+                output_tmp[i, max_indices[i]] = 1
+            predict_list.append(output_tmp)
+        predict = torch.cat((predict_list[2], predict_list[0], predict_list[1]), dim=1)
+        for prediction, ground_truth in zip(predict, labels[:, :-1]):
+            for part, (start_idx, end_idx) in index_ranges.items():
+                accuracy = calculate_multi_label_accuracy(prediction[start_idx:end_idx], ground_truth[start_idx:end_idx])
+                total_train_acc[part] += accuracy
+            num_acc += 1
+    return loss, total_train_acc, num_acc
 
 def train_mul(model, device, data_num, epochs, optimizer, loss_function, train_loader, valid_loader, early_stop, scheduler, check_path, output_log):
     # Let ini config file can be writted
