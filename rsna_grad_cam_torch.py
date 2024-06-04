@@ -97,9 +97,10 @@ def get_parser():
     parser.add_argument('-t','--test', help="  Gradcam test for selection (10 pos, 10 neg) ", action='store_const', const=True, default=False)
     return parser
 
-def data_progress_all(file, dicts):
+def data_progress_all(file, dicts, attention_mask = False):
     dicts = []
     dir = "/SSD/TotalSegmentator/rsna_selected_crop_bbox"
+    mask_dir = "/SSD/rsna-2023/train_images_new"
     for index, row in file.iterrows():
         # dirs = os.path.dirname(row['file_paths'])
         output = os.path.basename(row['file_paths'])[:-7]
@@ -107,7 +108,13 @@ def data_progress_all(file, dicts):
         image_spl = os.path.join(dir,"spl",output)+".nii.gz"
         image_kid_r = os.path.join(dir,"kid",output)+"_r.nii.gz"
         image_kid_l = os.path.join(dir,"kid",output)+"_l.nii.gz"
-        row['healthy']=0
+        ID = str(row['patient_id'])
+        Slice_ID = row['file_paths'].split('/')[-2]
+        mask_liv = os.path.join(mask_dir,ID,Slice_ID,"liver.nii.gz")
+        mask_spl = os.path.join(mask_dir,ID,Slice_ID,"spleen.nii.gz")
+        mask_kid_r = os.path.join(mask_dir,ID,Slice_ID,"kidney_right.nii.gz")
+        mask_kid_l = os.path.join(mask_dir,ID,Slice_ID,"kidney_left.nii.gz")
+        row['healthy'] = 0
         if row["liver_healthy"] ==1 and row["spleen_healthy"] ==1 and row["kidney_healthy"] ==1:
             row['healthy']=1
         # Edit organ healthy label
@@ -115,8 +122,16 @@ def data_progress_all(file, dicts):
                           row["liver_healthy"],row["liver_low"],row["liver_high"],
                           row["spleen_healthy"],row["spleen_low"],row["spleen_high"],
                           row['healthy']])
-        
-        dicts.append({"image_liv": image_liv, "image_spl": image_spl, "image_kid_r": image_kid_r, "image_kid_l": image_kid_l, "label": label})
+        if attention_mask:
+            dicts.append({"image_liv": image_liv, "image_spl": image_spl, 
+                        "image_kid_r": image_kid_r, "image_kid_l": image_kid_l, 
+                        "mask_liv": mask_liv, "mask_spl": mask_spl,
+                        "mask_kid_r": mask_kid_r, "mask_kid_l": mask_kid_l,
+                        "label": label})
+        else:
+            dicts.append({"image_liv": image_liv, "image_spl": image_spl, 
+                        "image_kid_r": image_kid_r, "image_kid_l": image_kid_l, 
+                        "label": label})
 
     return dicts
 
@@ -209,8 +224,9 @@ lr_decay_epoch = conf.getint('Data_Setting','lr_decay_epoch')
 # img_type = conf.get('Data_Setting','img_type')
 # loss_type = conf.get('Data_Setting','loss')
 fpn_type = conf.get('Data_Setting','fpn_type')
+use_amp = conf.getboolean('Data_Setting','use_amp')
+attention_mask = conf.getboolean('Data_Setting','attention_mask')
 # bbox = conf.getboolean('Data_Setting','bbox')
-# attention_mask = conf.getboolean('Data_Setting','attention_mask')
 # HU range: ex 0,100
 # img_hu = eval(conf.get('Data_Setting','img_hu'))
 
@@ -262,24 +278,42 @@ All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
 All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 
 df_all = All_data
-
-test_transforms = Compose([
-        LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
-        EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
-        ScaleIntensityRanged(
-        # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-            keys=["image_liv","image_spl","image_kid_r","image_kid_l"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-        ),
-        Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-        Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], axcodes="RAS"),
-        CropForegroundd(keys=["image_liv"], source_key="image_liv"),
-        CropForegroundd(keys=["image_spl"], source_key="image_spl"),
-        CropForegroundd(keys=["image_kid_r"], source_key="image_kid_r"),
-        CropForegroundd(keys=["image_kid_l"], source_key="image_kid_l"),
-        Resized(keys=["image_liv","image_spl"], spatial_size = size, mode=("trilinear")),
-        Resized(keys=["image_kid_r","image_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear"))                
-    ])
-
+if not attention_mask:
+    test_transforms = Compose([
+            LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
+            EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
+            ScaleIntensityRanged(
+            # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                keys=["image_liv","image_spl","image_kid_r","image_kid_l"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+            ),
+            Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+            Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], axcodes="RAS"),
+            CropForegroundd(keys=["image_liv"], source_key="image_liv"),
+            CropForegroundd(keys=["image_spl"], source_key="image_spl"),
+            CropForegroundd(keys=["image_kid_r"], source_key="image_kid_r"),
+            CropForegroundd(keys=["image_kid_l"], source_key="image_kid_l"),
+            Resized(keys=["image_liv","image_spl"], spatial_size = size, mode=("trilinear")),
+            Resized(keys=["image_kid_r","image_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear"))                
+        ])
+else:
+    test_transforms = Compose([
+                LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"]),
+                EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"]),
+                ScaleIntensityRanged(
+                # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                    keys=["image_liv","image_spl","image_kid_r","image_kid_l"], 
+                    a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True
+                ),
+                Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"], 
+                        pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+                Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"], axcodes="RAS"),
+                CropForegroundd(keys=["image_liv","mask_liv"], source_key="image_liv"),
+                CropForegroundd(keys=["image_spl","mask_spl"], source_key="image_spl"),
+                CropForegroundd(keys=["image_kid_r","mask_kid_r"], source_key="image_kid_r"),
+                CropForegroundd(keys=["image_kid_l","mask_kid_l"], source_key="image_kid_l"),
+                Resized(keys=["image_liv","image_spl","mask_liv","mask_spl"], spatial_size = size, mode=("trilinear")),
+                Resized(keys=["image_kid_r","image_kid_l","mask_kid_r","mask_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear"))                
+            ])
 
 
 for k in range(len(data_file_name)):
@@ -311,14 +345,14 @@ for k in range(len(data_file_name)):
 
     # test_data_dicts = data_progress_all(test_df, 'test_data_dict', class_type)
     
-    test_data_dicts = data_progress_all(test_df, 'test_data_dict')
+    test_data_dicts = data_progress_all(test_df, 'test_data_dict', attention_mask)
 
     test_ds = CacheDataset(data=test_data_dicts, transform=test_transforms, cache_rate=1, num_workers=dataloader_num_workers)
     test_data = DataLoader(test_ds, batch_size=testing_batch_size, num_workers=dataloader_num_workers)
 
     device = torch.device("cuda",0)
 
-    if architecture == 'densenet':
+if architecture == 'densenet':
         if fpn_type == 'label_concat':
             model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, num_init_features=size[0], dropout=0.2, class_num=3, fpn_type=fpn_type)
         elif fpn_type == 'split':
@@ -327,11 +361,19 @@ for k in range(len(data_file_name)):
             model = DenseNet3D_FPN.DenseNet3D_FPN(n_input_channels=1, num_init_features=size[0], dropout=0.2, class_num=3, fpn_type=fpn_type)
     elif architecture == 'efficientnet':
         if fpn_type == 'label_concat':
-            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+            # model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, normalize=False)
         elif fpn_type == 'split':
-            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
         elif fpn_type == 'feature_concat':
-            model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
+            if attention_mask:
+                model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, normalize=False, in_channels=2)
+            else:
+                model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, normalize=False)
+            # model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
+    elif architecture == 'resnet':
+        if fpn_type == 'label_concat':
+            model = Resnet3D_3_input(size=size, num_classes=3, device=device)
     
     if gpu_num == 'all':
         model = nn.DataParallel(model).to(device)

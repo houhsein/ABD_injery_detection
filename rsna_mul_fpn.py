@@ -91,9 +91,10 @@ def get_parser():
 # bbox : 對Totalsegmatator出來的結果進行dilation並且轉換成bounding box
 
 # 這個部分也要看你docker路徑去改對應路徑
-def data_progress_all(file, dicts):
+def data_progress_all(file, dicts, attention_mask = False):
     dicts = []
     dir = "/SSD/TotalSegmentator/rsna_selected_crop_bbox"
+    mask_dir = "/SSD/rsna-2023/train_images_new"
     for index, row in file.iterrows():
         # dirs = os.path.dirname(row['file_paths'])
         output = os.path.basename(row['file_paths'])[:-7]
@@ -101,7 +102,13 @@ def data_progress_all(file, dicts):
         image_spl = os.path.join(dir,"spl",output)+".nii.gz"
         image_kid_r = os.path.join(dir,"kid",output)+"_r.nii.gz"
         image_kid_l = os.path.join(dir,"kid",output)+"_l.nii.gz"
-        row['healthy']=0
+        ID = str(row['patient_id'])
+        Slice_ID = row['file_paths'].split('/')[-2]
+        mask_liv = os.path.join(mask_dir,ID,Slice_ID,"liver.nii.gz")
+        mask_spl = os.path.join(mask_dir,ID,Slice_ID,"spleen.nii.gz")
+        mask_kid_r = os.path.join(mask_dir,ID,Slice_ID,"kidney_right.nii.gz")
+        mask_kid_l = os.path.join(mask_dir,ID,Slice_ID,"kidney_left.nii.gz")
+        row['healthy'] = 0
         if row["liver_healthy"] ==1 and row["spleen_healthy"] ==1 and row["kidney_healthy"] ==1:
             row['healthy']=1
         # Edit organ healthy label
@@ -109,8 +116,16 @@ def data_progress_all(file, dicts):
                           row["liver_healthy"],row["liver_low"],row["liver_high"],
                           row["spleen_healthy"],row["spleen_low"],row["spleen_high"],
                           row['healthy']])
-        
-        dicts.append({"image_liv": image_liv, "image_spl": image_spl, "image_kid_r": image_kid_r, "image_kid_l": image_kid_l, "label": label})
+        if attention_mask:
+            dicts.append({"image_liv": image_liv, "image_spl": image_spl, 
+                        "image_kid_r": image_kid_r, "image_kid_l": image_kid_l, 
+                        "mask_liv": mask_liv, "mask_spl": mask_spl,
+                        "mask_kid_r": mask_kid_r, "mask_kid_l": mask_kid_l,
+                        "label": label})
+        else:
+            dicts.append({"image_liv": image_liv, "image_spl": image_spl, 
+                        "image_kid_r": image_kid_r, "image_kid_l": image_kid_l, 
+                        "label": label})
 
     return dicts
 
@@ -179,17 +194,17 @@ def run_once(times=0):
     # valid_df = train_df
     # test_df = test_df
 
-    train_data_dicts = data_progress_all(train_df, 'train_data_dict')
-    valid_data_dicts = data_progress_all(valid_df, 'valid_data_dict')
-    test_data_dicts  = data_progress_all(test_df, 'test_data_dict')
+    train_data_dicts = data_progress_all(train_df, 'train_data_dict', attention_mask)
+    valid_data_dicts = data_progress_all(valid_df, 'valid_data_dict', attention_mask)
+    test_data_dicts  = data_progress_all(test_df, 'test_data_dict', attention_mask)
     #with open('/tf/jacky831006/ABD_data/train.pickle', 'wb') as f:
     #    pickle.dump(train_data_dicts, f)
 
     set_determinism(seed=0)
     train_ds = CacheDataset(data=train_data_dicts, transform=train_transforms, cache_rate=1, num_workers=dataloader_num_workers)
-    train_loader = DataLoader(train_ds, batch_size=traning_batch_size, shuffle=True, num_workers=dataloader_num_workers)
+    train_loader = DataLoader(train_ds, batch_size=traning_batch_size, shuffle=True, num_workers=dataloader_num_workers, pin_memory=True)
     valid_ds = CacheDataset(data=valid_data_dicts, transform=valid_transforms, cache_rate=1, num_workers=dataloader_num_workers)
-    val_loader = DataLoader(valid_ds, batch_size=valid_batch_size, num_workers=dataloader_num_workers)
+    val_loader = DataLoader(valid_ds, batch_size=valid_batch_size, num_workers=dataloader_num_workers, pin_memory=True)
     
     if gpu_num == 'all':
         device = torch.device("cuda")
@@ -212,11 +227,21 @@ def run_once(times=0):
     elif architecture == 'efficientnet':
         if fpn_type == 'label_concat':
             # model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type)
-            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, normalize=False)
+            if fpn == 'bifpn':
+                model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient, 
+                                            in_channels=2 if attention_mask else 1)
+            else:
+                model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, 
+                                            normalize=False, in_channels=2 if attention_mask else 1)
         elif fpn_type == 'split':
             model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
         elif fpn_type == 'feature_concat':
-            model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, normalize=False)
+            if fpn == 'bifpn':
+                model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient, 
+                                            in_channels=2 if attention_mask else 1)
+            else:
+                model = EfficientNet3D_FPN(size=size, structure_num=structure_num, class_num=3, fpn_type=fpn_type, depth_coefficient=depth_coefficient, 
+                                        normalize=False, in_channels=2 if attention_mask else 1)
             # model = EfficientNet3D_BiFPN(size=size, structure_num=structure_num, class_num=3, dropout=0.2, fpn_type=fpn_type, depth_coefficient=depth_coefficient)
     elif architecture == 'resnet':
         if fpn_type == 'label_concat':
@@ -311,7 +336,7 @@ def run_once(times=0):
     
    
     test_model = train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
-                        val_loader, early_stop, scheduler, check_path, fpn_type, eval_score, use_amp)
+                        val_loader, early_stop, scheduler, check_path, fpn_type, eval_score, use_amp, attention_mask)
                     
     # plot train loss and metric 
     plot_loss_metric(config.epoch_loss_values, config.metric_values, check_path)
@@ -336,7 +361,7 @@ def run_once(times=0):
     file_list.append(now)
     epoch_list.append(config.best_metric_epoch)
 
-    test_acc = valid_mul_fpn(model, test_loader, device, eval_score)
+    test_acc = valid_mul_fpn(model, test_loader, device, eval_score, attention_mask)
     test_accuracy_list.append(test_acc)
     del test_ds
     del test_loader
@@ -374,6 +399,7 @@ if __name__ == '__main__':
     if architecture == 'efficientnet':
         structure_num = conf.get('Data_Setting', 'structure_num')
         depth_coefficient = conf.getfloat('Data_Setting', 'depth_coefficient')
+        fpn = conf.get('Data_Setting','fpn')
     gpu_num = conf.get('Data_Setting','gpu')
     seed = conf.getint('Data_Setting','seed')
     cross_kfold = conf.getint('Data_Setting','cross_kfold')
@@ -398,9 +424,9 @@ if __name__ == '__main__':
     fpn_type = conf.get('Data_Setting','fpn_type')
     eval_score = conf.get('Data_Setting','eval_score')
     use_amp = conf.getboolean('Data_Setting','use_amp')
+    attention_mask = conf.getboolean('Data_Setting','attention_mask')
 
     # bbox = conf.getboolean('Data_Setting','bbox')
-    # attention_mask = conf.getboolean('Data_Setting','attention_mask')
     # HU range: ex 0,100
     # img_hu = eval(conf.get('Data_Setting','img_hu'))
 
@@ -439,8 +465,8 @@ if __name__ == '__main__':
     # Data progressing
     All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
     pos_data = All_data[All_data['any_injury']==1]
-    neg_data = All_data[All_data['any_injury']==0].sample(n=len(pos_data), random_state=seed)
-    # neg_data = All_data[All_data['any_injury']==0].sample(n=300, random_state=seed)
+    # neg_data = All_data[All_data['any_injury']==0].sample(n=len(pos_data), random_state=seed)
+    neg_data = All_data[All_data['any_injury']==0].sample(n=300, random_state=seed)
     All_data = pd.concat([pos_data, neg_data])
     no_seg_kid = pd.read_csv("/SSD/rsna-2023/nosegmentation_kid.csv")
     no_seg = pd.read_csv("/SSD/rsna-2023/nosegmentation.csv")
@@ -450,53 +476,105 @@ if __name__ == '__main__':
     df_all = All_data
     # if bbox and attention_mask:
         # raise ValueError("Only one of 'bbox' and 'attention_mask' can be selected as True.")
+    if not attention_mask:
+        train_transforms = Compose([
+                LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
+                EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
+                #RepeatChanneld(keys=["image","label"], repeats = num_sample),
+                ScaleIntensityRanged(
+                    #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                    keys=["image_liv","image_spl","image_kid_r","image_kid_l"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+                ),
+                #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
+                Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+                Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], axcodes="RAS"),
+                CropForegroundd(keys=["image_liv"], source_key="image_liv"),
+                CropForegroundd(keys=["image_spl"], source_key="image_spl"),
+                CropForegroundd(keys=["image_kid_r"], source_key="image_kid_r"),
+                CropForegroundd(keys=["image_kid_l"], source_key="image_kid_l"),
+                Resized(keys=["image_liv","image_spl"], spatial_size = size, mode=("trilinear")),
+                Rand3DElasticd(
+                    keys=["image_liv","image_spl","image_kid_r","image_kid_l"],
+                    mode=("bilinear"),
+                    prob=prob,
+                    sigma_range=sigma_range,
+                    magnitude_range=magnitude_range,
+                    spatial_size=size,
+                    translate_range=translate_range,
+                    rotate_range=rotate_range,
+                    scale_range=scale_range,
+                    padding_mode="border"),
+                Resized(keys=["image_kid_r","image_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear")),
+            ])
+        valid_transforms = Compose([
+                LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
+                EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
+                ScaleIntensityRanged(
+                # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                    keys=["image_liv","image_spl","image_kid_r","image_kid_l"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+                ),
+                Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+                Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], axcodes="RAS"),
+                CropForegroundd(keys=["image_liv"], source_key="image_liv"),
+                CropForegroundd(keys=["image_spl"], source_key="image_spl"),
+                CropForegroundd(keys=["image_kid_r"], source_key="image_kid_r"),
+                CropForegroundd(keys=["image_kid_l"], source_key="image_kid_l"),
+                Resized(keys=["image_liv","image_spl"], spatial_size = size, mode=("trilinear")),
+                Resized(keys=["image_kid_r","image_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear"))                
+            ])
+    else:
+        train_transforms = Compose([
+                LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l",
+                                "mask_liv","mask_spl","mask_kid_r","mask_kid_l"]),
+                EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l",
+                                        "mask_liv","mask_spl","mask_kid_r","mask_kid_l"]),
+                #RepeatChanneld(keys=["image","label"], repeats = num_sample),
+                ScaleIntensityRanged(
+                    #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                    keys=["image_liv","image_spl","image_kid_r","image_kid_l"], 
+                        a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+                ),
+                #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
+                Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"], 
+                        pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+                Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"], axcodes="RAS"),
+                CropForegroundd(keys=["image_liv","mask_liv"], source_key="image_liv"),
+                CropForegroundd(keys=["image_spl","mask_spl"], source_key="image_spl"),
+                CropForegroundd(keys=["image_kid_r","mask_kid_r"], source_key="image_kid_r"),
+                CropForegroundd(keys=["image_kid_l","mask_kid_l"], source_key="image_kid_l"),
+                Resized(keys=["image_liv","image_spl","mask_liv","mask_spl"], spatial_size = size, mode=("trilinear")),
+                Rand3DElasticd(
+                    keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"],
+                    mode=("bilinear"),
+                    prob=prob,
+                    sigma_range=sigma_range,
+                    magnitude_range=magnitude_range,
+                    spatial_size=size,
+                    translate_range=translate_range,
+                    rotate_range=rotate_range,
+                    scale_range=scale_range,
+                    padding_mode="border"),
+                Resized(keys=["image_kid_r","image_kid_l","mask_kid_r","mask_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear")),
+            ])
 
-    train_transforms = Compose([
-            LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
-            EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
-            #RepeatChanneld(keys=["image","label"], repeats = num_sample),
-            ScaleIntensityRanged(
-                #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                keys=["image_liv","image_spl","image_kid_r","image_kid_l"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-            ),
-            #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
-            Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-            Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], axcodes="RAS"),
-            CropForegroundd(keys=["image_liv"], source_key="image_liv"),
-            CropForegroundd(keys=["image_spl"], source_key="image_spl"),
-            CropForegroundd(keys=["image_kid_r"], source_key="image_kid_r"),
-            CropForegroundd(keys=["image_kid_l"], source_key="image_kid_l"),
-            # Resized(keys=["image_liv","image_spl"], spatial_size = size, mode=("trilinear")),
-            Rand3DElasticd(
-                keys=["image_liv","image_spl","image_kid_r","image_kid_l"],
-                mode=("bilinear"),
-                prob=prob,
-                sigma_range=sigma_range,
-                magnitude_range=magnitude_range,
-                spatial_size=size,
-                translate_range=translate_range,
-                rotate_range=rotate_range,
-                scale_range=scale_range,
-                padding_mode="border"),
-            Resized(keys=["image_kid_r","image_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear")),
-        ])
-    valid_transforms = Compose([
-            LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
-            EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"]),
-            ScaleIntensityRanged(
-            # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                keys=["image_liv","image_spl","image_kid_r","image_kid_l"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-            ),
-            Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-            Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l"], axcodes="RAS"),
-            CropForegroundd(keys=["image_liv"], source_key="image_liv"),
-            CropForegroundd(keys=["image_spl"], source_key="image_spl"),
-            CropForegroundd(keys=["image_kid_r"], source_key="image_kid_r"),
-            CropForegroundd(keys=["image_kid_l"], source_key="image_kid_l"),
-            Resized(keys=["image_liv","image_spl"], spatial_size = size, mode=("trilinear")),
-            Resized(keys=["image_kid_r","image_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear"))                
-        ])
-
+        valid_transforms = Compose([
+                LoadImaged(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"]),
+                EnsureChannelFirstd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"]),
+                ScaleIntensityRanged(
+                # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                    keys=["image_liv","image_spl","image_kid_r","image_kid_l"], 
+                    a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True
+                ),
+                Spacingd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"], 
+                        pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+                Orientationd(keys=["image_liv","image_spl","image_kid_r","image_kid_l","mask_liv","mask_spl","mask_kid_r","mask_kid_l"], axcodes="RAS"),
+                CropForegroundd(keys=["image_liv","mask_liv"], source_key="image_liv"),
+                CropForegroundd(keys=["image_spl","mask_spl"], source_key="image_spl"),
+                CropForegroundd(keys=["image_kid_r","mask_kid_r"], source_key="image_kid_r"),
+                CropForegroundd(keys=["image_kid_l","mask_kid_l"], source_key="image_kid_l"),
+                Resized(keys=["image_liv","image_spl","mask_liv","mask_spl"], spatial_size = size, mode=("trilinear")),
+                Resized(keys=["image_kid_r","image_kid_l","mask_kid_r","mask_kid_l"], spatial_size = (size[0],size[1],size[2]//2), mode=("trilinear"))                
+            ])
     # Training by cross validation
     accuracy_list = []
     test_accuracy_list = []

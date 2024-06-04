@@ -96,9 +96,10 @@ def test(model, testLoader, device):
         print("Test Accuracy: {}".format(num_correct / metric_count))
         return (predict_values)
 
-def test_mul_fpn(model, testLoader, device):
+def test_mul_fpn(model, testLoader, device, use_amp=False, attention_mask=False):
     pre_first = True
     model.eval()
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     with torch.no_grad():
         num_acc = 0
         metric_count = 0
@@ -119,9 +120,23 @@ def test_mul_fpn(model, testLoader, device):
         for testdata in testLoader:
             input_liv, input_spl, input_kid_r, input_kid_l = testdata['image_liv'].to(device), testdata['image_spl'].to(device), \
                                                 testdata['image_kid_r'].to(device), testdata['image_kid_l'].to(device)
+            if attention_mask:
+                mask_liv, mask_spl, mask_kid_r, mask_kid_l = val_data['mask_liv'].to(device), val_data['mask_spl'].to(device), \
+                                                            val_data['mask_kid_r'].to(device), val_data['mask_kid_l'].to(device)
             test_labels = testdata['label'].to(device)
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
-            output = model(input_liv, input_spl, input_kid)
+            if attention_mask:
+                mask_kid = torch.cat((mask_kid_r,mask_kid_l), dim=-1)
+                input_liv = torch.cat((input_liv, mask_liv), dim=1)
+                input_spl = torch.cat((input_spl, mask_spl), dim=1)
+                input_kid = torch.cat((input_kid, mask_kid), dim=1)
+            
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    output = model(input_liv, input_spl, input_kid)
+            else:
+                output = model(input_liv, input_spl, input_kid)
+            
             outputs = [F.softmax(tensor, dim=1) for tensor in output]
             predict_list = []
             for tensor in outputs:

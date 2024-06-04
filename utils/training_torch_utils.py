@@ -520,7 +520,7 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
     return model
 
 def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, train_loader, 
-    valid_loader, early_stop, scheduler, check_path, fpn_type='label_concat', eval_score='total_score', use_amp=False):
+    valid_loader, early_stop, scheduler, check_path, fpn_type='label_concat', eval_score='total_score', use_amp=False, attention_mask=False):
     # Let ini config file can be writted
     # fpn loss 分成 concat, softmax, individual
     best_metric_epoch = -1
@@ -558,21 +558,29 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
             labels = batch_data['label'].float().to(device)
             input_liv, input_spl, input_kid_r, input_kid_l = batch_data['image_liv'].to(device), batch_data['image_spl'].to(device), \
                                                             batch_data['image_kid_r'].to(device), batch_data['image_kid_l'].to(device)
+            if attention_mask:
+                mask_liv, mask_spl, mask_kid_r, mask_kid_l = batch_data['mask_liv'].to(device), batch_data['mask_spl'].to(device), \
+                                                            batch_data['mask_kid_r'].to(device), batch_data['mask_kid_l'].to(device)
             # TODO 可以思考怎麼合併kidney                              
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
+            if attention_mask:
+                mask_kid = torch.cat((mask_kid_r,mask_kid_l), dim=-1)
+                input_liv = torch.cat((input_liv, mask_liv), dim=1)
+                input_spl = torch.cat((input_spl, mask_spl), dim=1)
+                input_kid = torch.cat((input_kid, mask_kid), dim=1)
             optimizer.zero_grad()
-
+                
             if use_amp:
                 with torch.cuda.amp.autocast():
-                     loss, total_train_acc, num_acc = forward_pass(
-                        model, input_liv, input_spl, input_kid, labels, loss_function, fpn_type, total_train_acc, index_ranges, num_acc
-                    )
+                        loss, total_train_acc, num_acc = forward_pass(
+                            model, input_liv, input_spl, input_kid, labels, loss_function, fpn_type, total_train_acc, index_ranges, num_acc
+                        )
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss, total_train_acc, num_acc = forward_pass(
-                        model, input_liv, input_spl, input_kid, labels, loss_function, fpn_type, total_train_acc, index_ranges, num_acc
+                        model, input_liv, input_spl, input_kid,  labels, loss_function, fpn_type, total_train_acc, index_ranges, num_acc
                     )
                 loss.backward()
                 optimizer.step()
@@ -592,7 +600,7 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
         minutes, seconds = divmod(rem, 60)
         print(f'one epoch runtime:{int(minutes)}:{seconds}')
         # Early stopping & save best weights by using validation
-        metric = valid_mul_fpn(model, valid_loader, device, eval_score)
+        metric = valid_mul_fpn(model, valid_loader, device, eval_score, use_amp, attention_mask)
         scheduler.step(metric)
         # checkpoint setting
         if comparison_operator(metric, best_metric):
@@ -822,9 +830,10 @@ def calculate_multi_label_accuracy(predictions, ground_truths):
 
     return accuracy.item()
     
-def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
+def valid_mul_fpn(model, val_loader, device, eval_score='total_acc', use_amp=False, attention_mask=False):
     #metric_values = list()
     model.eval()
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     with torch.no_grad():
         num_acc = 0
         metric_count = 0
@@ -844,11 +853,24 @@ def valid_mul_fpn(model, val_loader, device, eval_score='total_acc'):
         for val_data in val_loader:
             input_liv, input_spl, input_kid_r, input_kid_l = val_data['image_liv'].to(device), val_data['image_spl'].to(device), \
                                                 val_data['image_kid_r'].to(device), val_data['image_kid_l'].to(device)
+            if attention_mask:
+                mask_liv, mask_spl, mask_kid_r, mask_kid_l = val_data['mask_liv'].to(device), val_data['mask_spl'].to(device), \
+                                                            val_data['mask_kid_r'].to(device), val_data['mask_kid_l'].to(device)
             val_labels = val_data['label'].to(device)
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
-            val_outputs = model(input_liv, input_spl, input_kid)
+            if attention_mask:
+                mask_kid = torch.cat((mask_kid_r,mask_kid_l), dim=-1)
+                input_liv = torch.cat((input_liv, mask_liv), dim=1)
+                input_spl = torch.cat((input_spl, mask_spl), dim=1)
+                input_kid = torch.cat((input_kid, mask_kid), dim=1)
+
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    val_outputs = model(input_liv, input_spl, input_kid)
+            else:
+                val_outputs = model(input_liv, input_spl, input_kid)
+
             # 先前沒有經過softmax，因此valid記得做，避免後續預測有問題
-            
             # 確認output是否為器官預測分開的結果
             if isinstance(val_outputs, tuple):
                 val_outputs = [F.softmax(tensor, dim=1) for tensor in val_outputs]

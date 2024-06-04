@@ -325,9 +325,9 @@ def run_once(times=0):
         elif class_type == 'kidney':
             train_df = duplicate(train_df, 'kid_inj_tmp', num_samples)
 
-    train_df = train_df[:32]
-    valid_df = train_df[:32]
-    test_df = test_df[:32]
+    train_df = train_df
+    valid_df = train_df
+    test_df = test_df
 
     train_data_dicts = data_progress_all(train_df, 'train_data_dict', class_type)
     valid_data_dicts = data_progress_all(valid_df, 'valid_data_dict', class_type)
