@@ -465,14 +465,17 @@ if architecture == 'densenet':
         index = pre_index_ranges[cls_type]
         y_list_tmp = [v[index] for v in y_list]
         y_pre_n_tmp = [v[index] for v in y_pre_modified]
+        
         cm = confusion_matrix(y_list_tmp, y_pre_n_tmp)
         full_cm = np.zeros((n_classes, n_classes), dtype=int)
+
         if cm.shape[0] == 1:
             full_cm[0, 0] = cm
         elif cm.shape[0] == 2:
             full_cm[0:2, 0:2] = cm
         else:
             full_cm = cm
+
         plot_confusion_matrix(full_cm, classes=classes, title=f'{cls_type} Confusion matrix')
         plt.savefig(f"{dir_path}/{file_name}_{cls_type}_{fold}.png")
         plt.close()

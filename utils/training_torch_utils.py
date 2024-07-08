@@ -568,6 +568,7 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
                 input_liv = torch.cat((input_liv, mask_liv), dim=1)
                 input_spl = torch.cat((input_spl, mask_spl), dim=1)
                 input_kid = torch.cat((input_kid, mask_kid), dim=1)
+                
             optimizer.zero_grad()
                 
             if use_amp:
@@ -945,25 +946,13 @@ def validation(model, val_loader, device):
             # base on AngleLoss
             if isinstance(val_outputs, tuple):
                 val_outputs = AngleLoss_predict()(val_outputs)
-            if val_outputs.size(1) == 2:
-                value = torch.eq(val_outputs.argmax(dim=1), val_labels)
-                num_correct += value.sum().item()
-            else:
-                # 将预测分数转换为二进制标签，例如，通过应用阈值
-                binary_predictions = (val_outputs > 0.5).float()
-                correct_predictions = torch.eq(binary_predictions, val_labels)
-                # 计算每个样本的所有标签是否都被正确预测
-                all_correct_per_sample = torch.all(correct_predictions, dim=1)
-                # 计算正确分类的标签数
-                num_correct_labels = correct_predictions.sum().item()
-                total_labels = torch.numel(val_labels)
-                # 计算正确分类的样本数
-                num_correct += all_correct_per_sample.sum().item()
+                
+            predicted_indices = torch.argmax(val_outputs, dim=1)
+            actual_indices = torch.argmax(val_labels, dim=1)
+            correct_predictions = torch.eq(predicted_indices, actual_indices)
+            num_correct += correct_predictions.sum().item()
             metric_count += val_outputs.size(0)
-        # if 'total_labels' in locals():
-        if total_labels !=0:
-            label_accuracy = num_correct_labels / total_labels
-            print(f'validation num_correct_labels:{label_accuracy}',flush =True)
+
         metric = num_correct / metric_count
         config.metric_values.append(metric)
         #print(f'validation metric:{config.metric_values}',flush =True)

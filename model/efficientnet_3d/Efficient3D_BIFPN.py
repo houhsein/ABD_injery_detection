@@ -313,3 +313,101 @@ class EfficientNet3D_FPN(nn.Module):
             
 
         return output_liv, output_spl, output_kid
+
+class FPN(nn.Module):
+    def __init__(self, input_channels, output_channels, class_num):
+        super(FPN, self).__init__()
+        self.output_channels = output_channels
+        self.conv1 = nn.Conv3d(input_channels[0], output_channels, kernel_size=1)
+        self.conv2 = nn.Conv3d(input_channels[1], output_channels, kernel_size=1)
+        self.conv3 = nn.Conv3d(input_channels[2], output_channels, kernel_size=1)
+        self.conv4 = nn.Conv3d(input_channels[3], output_channels, kernel_size=1)
+        self.upsample = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
+        self.smooth = nn.Conv3d(output_channels, output_channels, kernel_size=3, stride=1, padding=1)
+        # self.classifier_4 = nn.Sequential(
+        #     nn.Linear(256*2*2*2, 1000), 
+        #     nn.Linear(1000, 512), 
+        #     nn.Dropout(dropout),
+        #     nn.Linear(512, class_num)   
+        # )
+        # self.classifier_3 = nn.Sequential(
+        #     nn.Linear(256*4*4*4, 1000), 
+        #     nn.Linear(1000, 512), 
+        #     nn.Dropout(dropout),
+        #     nn.Linear(512, class_num)   
+        # )
+        # self.classifier_2 = nn.Sequential(
+        #     nn.Linear(256*8*8*8, 1000), 
+        #     nn.Linear(1000, 512), 
+        #     nn.Dropout(dropout),
+        #     nn.Linear(512, class_num)  
+        # )
+        # self.classifier_1 = nn.Sequential(
+        #     nn.Linear(3*256*16*16*16, 1000), 
+        #     nn.Linear(1000, 512), 
+        #     nn.Dropout(0.2),
+        #     nn.Linear(512, class_num)  
+        # )
+
+    def forward(self, x):
+        # x is a list of feature maps from efficientnet at different scales
+        x2, x3, x4 = x
+
+        # x1 = self.conv1(x1)
+        x2 = self.conv2(x2)
+        x3 = self.conv3(x3)
+        x4 = self.conv4(x4)
+        # 上采样到下一层级的尺寸并加和
+        
+        x4_up = self.upsample(x4)  # 将 x4 上采样到 x3 的尺寸
+        x3 = x4_up + x3
+        x3_up = self.upsample(x3)  # 将 x3 上采样到 x2 的尺寸
+        x2 = x3_up + x2
+        # x2_up = self.upsample(x2)  # 将 x2 上采样到 x1 的尺寸
+        # x1 = x2_up + x1
+        # gradcam 取的convd層
+        x4 = self.smooth(x4) 
+        x3 = self.smooth(x3)
+        x2 = self.smooth(x2)
+        # x1 = self.smooth(x1)
+
+        # return x1, x2, x3, x4
+        return x2, x3, x4
+
+
+class EfficientNet_FPN(nn.Module):
+    def __init__(self, size, structure_num, class_num, depth_coefficient=1, fpn_type='label_concat', normal=True, in_channels=1):
+        super(EfficientNet_FPN, self).__init__()
+        self.fpn_type = fpn_type
+        self.efficientnet =  EfficientNet3D.from_name(f"efficientnet-{structure_num}", in_channels=in_channels, num_classes=class_num, image_size=size, normal=normal,  depth_coefficient=depth_coefficient)
+        self.fpn = FPN(input_channels=[16, 24, 40, 112], output_channels=256, class_num=class_num)
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.classifier = nn.Linear(256, class_num) # output_channels, class_num
+        self.feature_cat_classifier = nn.Linear(256*3, class_num) # output_channels*3, class_num
+        self.label_cat_classifier = nn.Linear(class_num*3, class_num)
+
+    def forward(self, x):
+        outputs = {}
+        x, _ = self.efficientnet.extract_endpoints(x)
+        reduction_keys = ['reduction_3', 'reduction_4', 'reduction_5']
+        x = tuple(x[key] for key in reduction_keys)
+        outputs['x2'], outputs['x3'], outputs['x4'] = self.fpn(x)
+        
+        if self.fpn_type == 'label_concat':
+            for fpn_layer in ['x2', 'x3', 'x4']:
+                outputs[fpn_layer] = self.avg_pool(outputs[fpn_layer])
+                outputs[fpn_layer] = torch.flatten(outputs[fpn_layer], 1)
+                outputs[fpn_layer] = self.classifier(outputs[fpn_layer])
+            output = torch.cat((outputs['x2'], outputs['x3'], outputs['x4']), dim=1)
+            output = self.label_cat_classifier(output)
+
+        elif self.fpn_type == 'feature_concat':
+                pooled_features = []
+                for fpn_layer in ['x2', 'x3', 'x4']:
+                    outputs[fpn_layer] = self.avg_pool(outputs[fpn_layer])
+                    outputs[fpn_layer] = torch.flatten(outputs[fpn_layer], 1)
+                    pooled_features.append(outputs[fpn_layer])
+                concatenated_features = torch.cat(pooled_features, dim=1)
+                output = self.feature_cat_classifier(concatenated_features) 
+
+        return output

@@ -81,12 +81,19 @@ def test(model, testLoader, device):
                 output = model(test_images)
             if isinstance(output, tuple):
                 output = AngleLoss_predict()(output)
+
+            predicted_indices = torch.argmax(output, dim=1)
+            if test_labels.dim() == 1:
+                actual_indices = test_labels
+            else:
+                actual_indices = torch.argmax(test_labels, dim=1)
+            
             # output 並非0-1之間 故進行轉換
             pre = nn.functional.softmax(output,dim=1).cpu().detach().numpy()
             # 比較output與label 對的話則返回 true 錯則 false
-            value = torch.eq(output.argmax(dim=1), test_labels)
-            metric_count += len(value)
-            num_correct += value.sum().item()
+            correct_predictions = torch.eq(predicted_indices, actual_indices)
+            metric_count += len(correct_predictions)
+            num_correct += correct_predictions.sum().item()
             if pre_first:
                 pre_first = None
                 predict_values = pre
@@ -339,11 +346,14 @@ def multi_label_progress(arr, index_ranges, optimal_th_list=False):
     out_lst = []
     for i in range(arr.shape[0]):
         one_list = []
-        for cls_type in ['kid','liv','spl']:
+        for cls_type in index_ranges.keys():
             if optimal_th_list:
                 tmp_pre = arr[i][index_ranges[cls_type][0]:index_ranges[cls_type][1]]
                 tmp_th = optimal_th_list[index_ranges[cls_type][0]//3]
-                result = [1 if a > b else 0 for a, b in zip(tmp_pre, tmp_th)]
+                if isinstance(tmp_th, list):
+                    result = [1 if a > b else 0 for a, b in zip(tmp_pre, tmp_th)]
+                else:
+                    result = [1 if a > tmp_th else 0 for a in tmp_pre]
                 one_list.append(find_import_label(result,tmp_pre))
             else:
                 tmp_pre = arr[i][index_ranges[cls_type][0]:index_ranges[cls_type][1]]

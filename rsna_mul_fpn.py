@@ -172,9 +172,13 @@ def train_valid_test_split(df, ratio=(0.7, 0.1, 0.2), seed=0, test_fix=None):
             frac=ratio[0], random_state=seed
         )
     df_sel = df.drop(train_df.index.to_list())
-    valid_df = df_sel.groupby("group_key", group_keys=False).sample(
-            frac=(ratio[1]/(ratio[2]+ratio[1])), random_state=seed)
-    test_df = df_sel.drop(valid_df.index.to_list())
+    if len(ratio) == 2:
+        valid_df = df_sel
+        test_df = None
+    else:
+        valid_df = df_sel.groupby("group_key", group_keys=False).sample(
+                frac=(ratio[1]/(ratio[2]+ratio[1])), random_state=seed)
+        test_df = df_sel.drop(valid_df.index.to_list())
     
     return train_df, valid_df, test_df
 
@@ -196,7 +200,8 @@ def run_once(times=0):
 
     train_data_dicts = data_progress_all(train_df, 'train_data_dict', attention_mask)
     valid_data_dicts = data_progress_all(valid_df, 'valid_data_dict', attention_mask)
-    test_data_dicts  = data_progress_all(test_df, 'test_data_dict', attention_mask)
+    if test_df:
+        test_data_dicts  = data_progress_all(test_df, 'test_data_dict', attention_mask)
     #with open('/tf/jacky831006/ABD_data/train.pickle', 'wb') as f:
     #    pickle.dump(train_data_dicts, f)
 
@@ -346,28 +351,28 @@ def run_once(times=0):
     del valid_ds
     del val_loader
     gc.collect()
+    if test_df:
+        # Avoid ram out of memory
+        test_ds = CacheDataset(data=test_data_dicts, transform=valid_transforms, cache_rate=1, num_workers=dataloader_num_workers)
+        test_loader = DataLoader(test_ds, batch_size=testing_batch_size, num_workers=dataloader_num_workers)
+        # validation is same as testing
+        print(f'Best accuracy:{config.best_metric}')
+        if config.best_metric != 0:
+            load_weight = f'{check_path}/{config.best_metric}.pth'
+            model.load_state_dict(torch.load(load_weight))
 
-    # Avoid ram out of memory
-    test_ds = CacheDataset(data=test_data_dicts, transform=valid_transforms, cache_rate=1, num_workers=dataloader_num_workers)
-    test_loader = DataLoader(test_ds, batch_size=testing_batch_size, num_workers=dataloader_num_workers)
-    # validation is same as testing
-    print(f'Best accuracy:{config.best_metric}')
-    if config.best_metric != 0:
-        load_weight = f'{check_path}/{config.best_metric}.pth'
-        model.load_state_dict(torch.load(load_weight))
+        # record paramter
+        accuracy_list.append(config.best_metric)
+        file_list.append(now)
+        epoch_list.append(config.best_metric_epoch)
 
-    # record paramter
-    accuracy_list.append(config.best_metric)
-    file_list.append(now)
-    epoch_list.append(config.best_metric_epoch)
+        test_acc = valid_mul_fpn(model, test_loader, device, eval_score, attention_mask)
+        test_accuracy_list.append(test_acc)
+        del test_ds
+        del test_loader
+        gc.collect()
 
-    test_acc = valid_mul_fpn(model, test_loader, device, eval_score, attention_mask)
-    test_accuracy_list.append(test_acc)
-    del test_ds
-    del test_loader
-    gc.collect()
-
-    print(f'\n Best accuracy:{config.best_metric}, Best test accuracy:{test_acc}')
+        print(f'\n Best accuracy:{config.best_metric}, Best test accuracy:{test_acc}')
 
 
 if __name__ == '__main__':
@@ -581,8 +586,8 @@ if __name__ == '__main__':
     file_list = []
     epoch_list = []
 
-    if cross_kfold*data_split_ratio[2] != 1 and cross_kfold!=1:
-        raise RuntimeError("Kfold number is not match test data ratio")
+    # if cross_kfold*data_split_ratio[2] != 1 and cross_kfold!=1:
+    #     raise RuntimeError("Kfold number is not match test data ratio")
 
     first_start_time = time.time()
     # kfold 
