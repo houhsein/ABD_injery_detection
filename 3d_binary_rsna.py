@@ -129,7 +129,14 @@ def data_progress_all(file, dicts, class_type, label_type, image_type, attention
             # 目前kidney都以單邊受傷為主
             # Negative資料可能會沒有kidney 要做判斷
             # label = int(row['kidney_inj_no'])
-            pass
+            if label_type == 'binary':
+                label = 0 if row['kidney_healthy'] == 1 else 1
+            else:
+                label = np.array([row["kidney_healthy"],row["kidney_low"],row["kidney_high"]])
+            if attention_mask:
+                dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'mask_r':mask_kid_r,'mask_l':mask_kid_l,'label':label})
+            else:
+                dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'label':label})
             
     return dicts    
 
@@ -297,6 +304,58 @@ def train_valid_test_split(df, ratio=(0.7, 0.1, 0.2), seed=0, test_fix=None):
     
         return train_df, valid_df, test_df
 
+def get_transforms(keys, size, prob, sigma_range, magnitude_range, translate_range, rotate_range, scale_range, valid=False):
+    if 'image_r' in keys and 'image_l' in keys:
+        other_key = ["image_r","image_l"]
+        size = size[0],size[1],size[2]//2
+    else:
+        other_key = ["image"]
+
+    if 'mask_r' in keys:
+        CropForegroundd_list = [
+        CropForegroundd(keys=['image_r','mask_r'], source_key='image_r'),
+        CropForegroundd(keys=['image_l','mask_l'], source_key='image_l')
+        ]
+    elif 'mask' in keys:
+        CropForegroundd_list = [
+        CropForegroundd(keys=['image','mask'], source_key='image')
+        ]
+    else:
+        CropForegroundd_list = [CropForegroundd(keys=[key], source_key=key) for key in keys]
+        
+    common_transforms = [
+            LoadImaged(keys=keys),
+            EnsureChannelFirstd(keys=keys),
+            # ImgAggd(keys=["image","bbox"], Hu_range=img_hu),
+            ScaleIntensityRanged(
+                #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                keys=other_key, a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+            ),
+            #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
+            #RepeatChanneld(keys=["image","label"], repeats = num_sample),
+            Spacingd(keys=keys, pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+            Orientationd(keys=keys, axcodes="RAS"),
+            *CropForegroundd_list, # Expand the list here
+            Resized(keys=keys, spatial_size = size, mode=("trilinear"))
+        ]
+    augmentation_transforms = [
+            Rand3DElasticd(
+                    keys=keys,
+                    mode=("bilinear"),
+                    prob=prob,
+                    sigma_range=sigma_range,
+                    magnitude_range=magnitude_range,
+                    spatial_size=size,
+                    translate_range=translate_range,
+                    rotate_range=rotate_range,
+                    scale_range=scale_range,
+                    padding_mode="border")
+        ]
+    if valid:
+        return Compose(common_transforms)
+    else:
+        return Compose(common_transforms + augmentation_transforms)
+
 # 進行完整一次預測
 def run_once(times=0):
     # reset config parameter
@@ -385,16 +444,17 @@ def run_once(times=0):
         grouped = df_all.groupby('spleen_healthy')
     elif class_type=='kidney': 
         #grouped = df_all.groupby('kidney_inj_no')
-        pass
+        grouped = df_all.groupby('kidney_healthy')
 
     # 根據資料比例來給予不同weight
     group_dict = {0: 0, 1: 0}
     for name, group in grouped:
         # 只有kidney的negative情況會需要考慮兩側
-        if class_type=='kidney' and name == 0:
-            pass
-        else:
-            group_dict[name] = len(group) * num_samples
+        # if class_type=='kidney' and name == 0:
+        #     pass
+        # else:
+        group_dict[name] = len(group) * num_samples
+
     if label_type == 'binary':
         weights = torch.tensor([1/group_dict[1], 1/group_dict[0]]).to(device)
     else:
@@ -570,7 +630,7 @@ if __name__ == '__main__':
     All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
     test_df = pd.read_csv('/tf/jacky831006/ABD_classification/rsna_test_20240531.csv')
     pos_data = All_data[All_data['any_injury']==1]
-    # neg_data = All_data[All_data['any_injury']==0].sample(n=len(pos_data)*, random_state=seed)
+    # neg_data = All_data[All_data['any_injury']==0].sample(n=len(pos_data), random_state=seed)
     neg_data = All_data[All_data['any_injury']==0]
     neg_data = neg_data.sample(n=int(len(neg_data)*0.5), random_state=seed)
     All_data = pd.concat([pos_data, neg_data])
@@ -583,84 +643,20 @@ if __name__ == '__main__':
     df_all = All_data
     
     if attention_mask:
-        train_transforms = Compose([
-                LoadImaged(keys=["image", "mask"]),
-                EnsureChannelFirstd(keys=["image", "mask"]),
-                # ImgAggd(keys=["image","bbox"], Hu_range=img_hu),
-                ScaleIntensityRanged(
-                    #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                    keys=["image"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-                ),
-                #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
-                #RepeatChanneld(keys=["image","label"], repeats = num_sample),
-                Spacingd(keys=["image","mask"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-                Orientationd(keys=["image","mask"], axcodes="RAS"),
-                CropForegroundd(keys=["image","mask"], source_key="image"),
-                Resized(keys=["image","mask"], spatial_size = size, mode=("trilinear")),
-                Rand3DElasticd(
-                    keys=["image","mask"],
-                    mode=("bilinear"),
-                    prob=prob,
-                    sigma_range=sigma_range,
-                    magnitude_range=magnitude_range,
-                    spatial_size=size,
-                    translate_range=translate_range,
-                    rotate_range=rotate_range,
-                    scale_range=scale_range,
-                    padding_mode="border")
-            ])
-        valid_transforms = Compose([
-                LoadImaged(keys=["image", "mask"]),
-                EnsureChannelFirstd(keys=["image", "mask"]),
-                # ImgAggd(keys=["image","bbox"], Hu_range=img_hu),
-                 ScaleIntensityRanged(
-                # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                    keys=["image"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-                ),
-                Spacingd(keys=["image","mask"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-                Orientationd(keys=["image","mask"], axcodes="RAS"),
-                CropForegroundd(keys=["image","mask"], source_key="image"),
-                Resized(keys=['image',"mask"], spatial_size = size, mode=("trilinear"))
-               
-            ])
+        if class_type =='kidney':
+            keys = ["image_r","image_l","mask_r","mask_l"]
+        else:
+            keys = ["image","mask"] 
     else:
-        train_transforms = Compose([
-                LoadImaged(keys=["image"]),
-                EnsureChannelFirstd(keys=["image"]),
-                #RepeatChanneld(keys=["image","label"], repeats = num_sample),
-                ScaleIntensityRanged(
-                    #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                    keys=["image"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-                ),
-                #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
-                Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-                Orientationd(keys=["image"], axcodes="RAS"),
-                CropForegroundd(keys=["image"], source_key="image"),
-                Resized(keys=['image'], spatial_size = size, mode=("trilinear")),
-                Rand3DElasticd(
-                    keys=["image"],
-                    mode=("bilinear"),
-                    prob=prob,
-                    sigma_range=sigma_range,
-                    magnitude_range=magnitude_range,
-                    spatial_size=size,
-                    translate_range=translate_range,
-                    rotate_range=rotate_range,
-                    scale_range=scale_range,
-                    padding_mode="border")
-            ])
-        valid_transforms = Compose([
-                LoadImaged(keys=["image"]),
-                EnsureChannelFirstd(keys=["image"]),
-                ScaleIntensityRanged(
-                # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                    keys=["image"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-                ),
-                Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-                Orientationd(keys=["image"], axcodes="RAS"),
-                CropForegroundd(keys=["image"], source_key="image"),
-                Resized(keys=['image'], spatial_size = size, mode=("trilinear"))                
-            ])
+        if class_type =='kidney':
+            keys = ["image_r","image_l"]
+        else:
+            keys = ["image"]
+        
+        train_transforms = get_transforms(keys, size, prob, sigma_range, magnitude_range, 
+                                    translate_range, rotate_range, scale_range)
+        valid_transforms = get_transforms(keys, size, prob, sigma_range, magnitude_range, 
+                                    translate_range, rotate_range, scale_range, valid=True)
 
     # Training by cross validation
     accuracy_list = []

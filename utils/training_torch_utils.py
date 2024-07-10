@@ -453,16 +453,25 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
                 labels = batch_data['label'].long().to(device)
             else:
                 labels = batch_data['label'].float().to(device)
-            inputs = batch_data['image'].to(device)
-            if "bbox" in batch_data:
-                bboxs = batch_data['bbox'].to(device)
+            # kidney
+            if "image_r" in batch_data:
+                image_r, image_l = batch_data['image_r'].to(device), batch_data['image_l'].to(device)
+                # z axis
+                inputs = torch.cat((image_r,image_l), dim=-1)
+            else:
+                inputs = batch_data['image'].to(device)
+
+            if "mask_r" in batch_data:
+                mask_r, mask_l = batch_data['mask_r'].to(device), batch_data['mask_l'].to(device)
+                mask = torch.cat((mask_r,mask_l), dim=-1)
+                inputs = torch.cat((inputs, mask), dim=1)
+            elif "mask" in batch_data:
+                mask = batch_data['mask'].to(device)
+                inputs = torch.cat((inputs, mask), dim=1)
 
             optimizer.zero_grad()
             #inputs, labels = Variable(inputs), Variable(labels)
-            if "bbox" in batch_data:
-                outputs = model(bboxs, inputs)
-            else:
-                outputs = model(inputs)
+            outputs = model(inputs)
             # print(f'outputs:{outputs.size()}')
             # print(f'labels:{labels.size()}')
             loss = loss_function(outputs, labels)
@@ -935,13 +944,25 @@ def validation(model, val_loader, device):
         metric_count = 0
         total_labels = 0
         num_correct_labels = 0.0
-        for val_data in val_loader:
-            val_images, val_labels = val_data['image'].to(device), val_data['label'].to(device)
-            if "bbox" in val_data:
-                bboxs = val_data['bbox'].to(device)
-                val_outputs = model(bboxs, val_images)
+        for batch_data in val_loader:
+                # kidney
+            if "image_r" in batch_data:
+                image_r, image_l = batch_data['image_r'].to(device), batch_data['image_l'].to(device)
+                # z axis concated
+                val_images = torch.cat((image_r,image_l), dim=-1)
             else:
-                val_outputs = model(val_images)
+                val_images = batch_data['image'].to(device)
+
+            if "mask_r" in batch_data:
+                mask_r, mask_l = batch_data['mask_r'].to(device), batch_data['mask_l'].to(device)
+                mask = torch.cat((mask_r,mask_l), dim=-1)
+                val_images = torch.cat((val_images, mask), dim=1)
+            elif "mask" in batch_data:
+                mask = batch_data['mask'].to(device)
+                val_images = torch.cat((val_images, mask), dim=1)
+
+            val_labels = batch_data['label'].to(device)
+            val_outputs = model(val_images)
             # print(val_outputs.size())
             # base on AngleLoss
             if isinstance(val_outputs, tuple):
