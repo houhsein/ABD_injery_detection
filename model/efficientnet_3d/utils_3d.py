@@ -487,11 +487,17 @@ def efficientnet3d(width_coefficient=None, depth_coefficient=None, image_size=No
         'r4_k5_s22_e6_i112_o192_se0.25',
         'r1_k3_s11_e6_i192_o320_se0.25',
     ]
+    New eddited 
+    blocks_args = [
+    'r1_k3_s222_e1_i32_o16_se0.25', 'r2_k3_s222_e6_i16_o24_se0.25',
+    'r2_k5_s222_e6_i24_o40_se0.25', 'r3_k3_s222_e6_i40_o80_se0.25',
+    'r3_k5_s111_e6_i80_o112_se0.25', 'r1_k3_s111_e6_i112_o320_se0.25',
+    ]
     '''
     # 決定 num_repeat, kernel size, stride, expand_ratio, input_filters, output_filters, se ratio, id_skip ( id_skip=('noskip' not in block_string)))
     if normal:
         blocks_args = [
-            'r1_k3_s222_e1_i32_o16_se0.25', 'r2_k3_s222_e6_i16_o24_se0.25',
+            'r1_k3_s111_e1_i32_o16_se0.25', 'r2_k3_s222_e6_i16_o24_se0.25',
             'r2_k5_s222_e6_i24_o40_se0.25', 'r3_k3_s222_e6_i40_o80_se0.25',
             'r3_k5_s111_e6_i80_o112_se0.25', 'r4_k5_s222_e6_i112_o192_se0.25',
             'r1_k3_s111_e6_i192_o320_se0.25',
@@ -500,7 +506,8 @@ def efficientnet3d(width_coefficient=None, depth_coefficient=None, image_size=No
         blocks_args = [
             'r1_k3_s222_e1_i32_o16_se0.25', 'r2_k3_s222_e6_i16_o24_se0.25',
             'r2_k5_s222_e6_i24_o40_se0.25', 'r3_k3_s222_e6_i40_o80_se0.25',
-            'r3_k5_s111_e6_i80_o112_se0.25', 'r1_k3_s111_e6_i112_o320_se0.25',
+            'r3_k5_s111_e6_i80_o112_se0.25', 'r4_k5_s222_e6_i112_o192_se0.25',
+            'r1_k3_s111_e6_i192_o320_se0.25',
         ]
     blocks_args = BlockDecoder.decode(blocks_args)
 

@@ -27,6 +27,8 @@ sys.path.append("/tf/jacky831006/ABD_classification/model/")
 from efficientnet_3d.model_3d import EfficientNet3D
 from efficientnet_3d.Efficient3D_BIFPN import EfficientNet3D_BiFPN
 from resnet_3d import resnet_3d
+from resnet_3d.resnet_3d_new import resnet101, ResNetWithClassifier
+from SuPreM.model.Universal_model import SwinUNETRClassifier
 from DenseNet3D_FPN import DenseNet3D_FPN
 # 此架構參考這篇
 # https://github.com/fei-aiart/NAS-Lung
@@ -48,6 +50,7 @@ from utils.grad_cam_torch_utils import(
     test,
     plot_confusion_matrix,
     plot_multi_class_roc,
+    plot_roc,
     multi_label_progress,
     plot_dis,
     confusion_matrix_CI
@@ -75,7 +78,8 @@ from monai.transforms import (
     Invertd,
     FillHoles,
     Resized,
-    RepeatChanneld
+    RepeatChanneld,
+    HistogramNormalized
 )
 import functools
 # let all of print can be flush = ture
@@ -105,6 +109,8 @@ def data_progress_all(file, dicts, class_type, label_type, image_type, attention
         dir = "/SSD/TotalSegmentator/rsna_selected_crop_bbox"
     elif image_type=='cropping_convex':
         dir = "/Data/TotalSegmentator/rsna_selected_crop_dilation_new"
+    elif image_type == 'gaussian_filter_channel_connected':
+        dir = "/Data/TotalSegmentator/rsna_selected_crop_gaussian_channel"
     
     mask_dir = "/SSD/rsna-2023/train_images_new"
     for index, row in file.iterrows():
@@ -143,7 +149,14 @@ def data_progress_all(file, dicts, class_type, label_type, image_type, attention
             # 目前kidney都以單邊受傷為主
             # Negative資料可能會沒有kidney 要做判斷
             # label = int(row['kidney_inj_no'])
-            pass
+            if label_type == 'binary':
+                label = 0 if row['kidney_healthy'] == 1 else 1
+            else:
+                label = np.array([row["kidney_healthy"],row["kidney_low"],row["kidney_high"]])
+            if attention_mask:
+                dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'mask_r':mask_kid_r,'mask_l':mask_kid_l,'label':label})
+            else:
+                dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'label':label})
             
     return dicts    
 
@@ -201,6 +214,58 @@ def label_trans(test_df, class_type, label_type):
         y_label = test_df.loc[:,[f'{class_type}_healthy',f'{class_type}_low',f'{class_type}_high']].values
     return y_label
 
+def get_transforms(keys, size, prob, sigma_range, magnitude_range, translate_range, rotate_range, scale_range, valid=False):
+    if 'image_r' in keys and 'image_l' in keys:
+        other_key = ["image_r","image_l"]
+        size = size[0],size[1],size[2]//2
+    else:
+        other_key = ["image"]
+
+    if 'mask_r' in keys:
+        CropForegroundd_list = [
+        CropForegroundd(keys=['image_r','mask_r'], source_key='image_r'),
+        CropForegroundd(keys=['image_l','mask_l'], source_key='image_l')
+        ]
+    elif 'mask' in keys:
+        CropForegroundd_list = [
+        CropForegroundd(keys=['image','mask'], source_key='image')
+        ]
+    else:
+        CropForegroundd_list = [CropForegroundd(keys=[key], source_key=key) for key in keys]
+        
+    common_transforms = [
+            LoadImaged(keys=keys),
+            EnsureChannelFirstd(keys=keys),
+            # ImgAggd(keys=["image","bbox"], Hu_range=img_hu),
+            ScaleIntensityRanged(
+                #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                keys=other_key, a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+            ),
+            #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
+            #RepeatChanneld(keys=["image","label"], repeats = num_sample),
+            HistogramNormalized(keys=other_key, num_bins=64, min=0, max=1.0),
+            Spacingd(keys=keys, pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
+            Orientationd(keys=keys, axcodes="RAS"),
+            *CropForegroundd_list, # Expand the list here
+            Resized(keys=keys, spatial_size = size, mode=("trilinear"))
+        ]
+    augmentation_transforms = [
+            Rand3DElasticd(
+                    keys=keys,
+                    mode=("bilinear"),
+                    prob=prob,
+                    sigma_range=sigma_range,
+                    magnitude_range=magnitude_range,
+                    spatial_size=size,
+                    translate_range=translate_range,
+                    rotate_range=rotate_range,
+                    scale_range=scale_range,
+                    padding_mode="border")
+        ]
+    if valid:
+        return Compose(common_transforms)
+    else:
+        return Compose(common_transforms + augmentation_transforms)
 
 parser = get_parser()
 args = parser.parse_args()
@@ -218,6 +283,12 @@ conf.read(cfgpath)
 # Augmentation
 size = eval(conf.get('Augmentation','size'))
 num_samples = conf.getint('Augmentation','num_sample')
+prob = conf.getfloat('Rand3DElasticd','prob')
+sigma_range = eval(conf.get('Rand3DElasticd','sigma_range'))
+magnitude_range = eval(conf.get('Rand3DElasticd','magnitude_range'))
+translate_range = eval(conf.get('Rand3DElasticd','translate_range'))
+rotate_range = eval(conf.get('Rand3DElasticd','rotate_range'))
+scale_range = eval(conf.get('Rand3DElasticd','scale_range'))
 
 # Data_setting
 architecture = conf.get('Data_Setting','architecture')
@@ -289,45 +360,35 @@ if gpu_num != 'all':
 
 # Data progressing
 All_data = pd.read_csv("/SSD/rsna-2023/rsna_train_new_v2.csv")
+test_df = pd.read_csv('/tf/jacky831006/ABD_classification/rsna_test_20240531.csv')
 pos_data = All_data[All_data['any_injury']==1]
-neg_data = All_data[All_data['any_injury']==0].sample(n=300, random_state=seed)
+# neg_data = All_data[All_data['any_injury']==0].sample(n=300, random_state=seed)
+neg_data = All_data[All_data['any_injury']==0]
+neg_data = neg_data.sample(n=int(len(neg_data)*0.5), random_state=seed)
 All_data = pd.concat([pos_data, neg_data])
 no_seg_kid = pd.read_csv("/SSD/rsna-2023/nosegmentation_kid.csv")
 no_seg = pd.read_csv("/SSD/rsna-2023/nosegmentation.csv")
 All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
 All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 
-test_df = pd.read_csv('/tf/jacky831006/ABD_classification/rsna_test_20240531.csv')
+test_fix = False
+if test_fix:
+    All_data = All_data[~All_data.file_paths.isin(test_df.file_paths.values)]
 df_all = All_data
-if not attention_mask:
-    test_transforms = Compose([
-                    LoadImaged(keys=["image"]),
-                    EnsureChannelFirstd(keys=["image"]),
-                    ScaleIntensityRanged(
-                    # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                        keys=["image"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-                    ),
-                    Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-                    Orientationd(keys=["image"], axcodes="RAS"),
-                    CropForegroundd(keys=["image"], source_key="image"),
-                    Resized(keys=['image'], spatial_size = size, mode=("trilinear"))                
-                ])
-else:
-    test_transforms = Compose([
-                LoadImaged(keys=["image", "mask"]),
-                EnsureChannelFirstd(keys=["image", "mask"]),
-                # ImgAggd(keys=["image","bbox"], Hu_range=img_hu),
-                 ScaleIntensityRanged(
-                # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                    keys=["image"], a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
-                ),
-                Spacingd(keys=["image","mask"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
-                Orientationd(keys=["image","mask"], axcodes="RAS"),
-                CropForegroundd(keys=["image","mask"], source_key="image"),
-                Resized(keys=['image',"mask"], spatial_size = size, mode=("trilinear"))
-               
-            ])
 
+if attention_mask:
+    if class_type =='kidney':
+        keys = ["image_r","image_l","mask_r","mask_l"]
+    else:
+        keys = ["image","mask"] 
+else:
+    if class_type =='kidney':
+        keys = ["image_r","image_l"]
+    else:
+        keys = ["image"]
+    
+test_transforms = get_transforms(keys, size, prob, sigma_range, magnitude_range, 
+                            translate_range, rotate_range, scale_range, valid=True)
 
 for k in range(len(data_file_name)):
     # cross_validation fold number
@@ -352,9 +413,10 @@ for k in range(len(data_file_name)):
 
     print("Collecting:", datetime.now(), flush=True)
 
-    # _, _, test_df = train_valid_test_split(df_all, ratio = data_split_ratio, seed = seed)
-
-    test_df = test_df
+    if test_fix:
+        test_df = test_df
+    else:
+        _, _, test_df = train_valid_test_split(df_all, ratio = data_split_ratio, seed = seed)
 
     # test_data_dicts = data_progress_all(test_df, 'test_data_dict', class_type)
     
@@ -421,16 +483,16 @@ for k in range(len(data_file_name)):
     
     y_label = label_trans(test_df, class_type, label_type)
 
-
     # ROC curve figure
     # optimal_th = plot_roc(y_pre, y_label, dir_path, f'{file_name}_{fold}')
     if label_type == 'binary':
         y_label_b = test_df[f'{class_type}_healthy'].replace({0: 1, 1: 0}).values
+        optimal_th = plot_roc(y_pre, y_label_b, dir_path, f'{file_name}_{fold}')
     else:
         index_ranges = {"other": (0, 3)}
         y_label_b = multi_label_progress(y_label, index_ranges)
         y_label_b = [item for sublist in y_label_b for item in sublist]
-    optimal_th_list = plot_multi_class_roc(y_pre, y_label_b, label_num, class_type, dir_path, f'{file_name}_{fold}')
+        optimal_th = plot_multi_class_roc(y_pre, y_label_b, label_num, class_type, dir_path, f'{file_name}_{fold}')
 
     if label_type == 'binary':
         # Data distributions
@@ -448,7 +510,7 @@ for k in range(len(data_file_name)):
         print(f'cutoff value:{cutoff}')
         print('Original cutoff')
     else:
-        print(f'cutoff value:{optimal_th_list}')
+        print(f'cutoff value:{optimal_th}')
     
     if label_type == 'binary':
         y_pre_n = list()
@@ -459,12 +521,12 @@ for k in range(len(data_file_name)):
                 else:
                     y_pre_n.append(1)
             else:
-                if y_pre[i][1] < optimal_th_list[1]:
+                if y_pre[i][1] < optimal_th:
                     y_pre_n.append(0)
                 else:
                     y_pre_n.append(1)
     else:
-        y_pre_n = multi_label_progress(y_pre, index_ranges, [optimal_th_list])
+        y_pre_n = multi_label_progress(y_pre, index_ranges, [optimal_th])
         y_pre_n = [item for sublist in y_pre_n for item in sublist]
 
     # write csv

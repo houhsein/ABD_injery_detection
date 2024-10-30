@@ -22,7 +22,7 @@ from skimage.measure import label as sk_label
 from skimage.measure import regionprops as sk_regions
 from skimage.transform import resize
 from tqdm import tqdm, trange
-from sklearn.metrics import accuracy_score, log_loss
+from sklearn.metrics import accuracy_score, log_loss, precision_score, recall_score, f1_score
 # Based on MONAI 1.1
 from monai.transforms.transform import MapTransform
 from monai.utils import ensure_tuple_rep
@@ -436,7 +436,7 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
         early_stop = None
     #epoch_loss_values = list()
     
-    writer = SummaryWriter()
+    # writer = SummaryWriter()
     for epoch in range(epochs):
         print("-" * 10)
         print(f"epoch {epoch + 1}/{epochs}")
@@ -464,13 +464,19 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
             if "mask_r" in batch_data:
                 mask_r, mask_l = batch_data['mask_r'].to(device), batch_data['mask_l'].to(device)
                 mask = torch.cat((mask_r,mask_l), dim=-1)
-                inputs = torch.cat((inputs, mask), dim=1)
+                # 將mask取實際的img
+                mask_crop = torch.where(mask != 1, torch.tensor(0), inputs)
+                inputs = torch.cat((inputs, mask_crop), dim=1)
             elif "mask" in batch_data:
                 mask = batch_data['mask'].to(device)
-                inputs = torch.cat((inputs, mask), dim=1)
+                # 將mask取實際的img
+                mask_crop = torch.where(mask != 1, torch.tensor(0), inputs)
+                inputs = torch.cat((inputs, mask_crop), dim=1)
 
             optimizer.zero_grad()
             #inputs, labels = Variable(inputs), Variable(labels)
+            if model.__class__.__name__ == ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+                inputs = inputs.permute(0, 1, 4, 2, 3)
             outputs = model(inputs)
             # print(f'outputs:{outputs.size()}')
             # print(f'labels:{labels.size()}')
@@ -479,8 +485,8 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
             optimizer.step()
             epoch_loss += loss.item()
             epoch_len = data_num // train_loader.batch_size
-            print(f"{step}/{epoch_len}, train_loss: {loss.item():.4f}")
-            writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
+            # print(f"{step}/{epoch_len}, train_loss: {loss.item():.4f}")
+            # writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
         epoch_loss /= step
         config.epoch_loss_values.append(epoch_loss)
         print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
@@ -509,11 +515,11 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
                 torch.save(model.state_dict(), f"{check_path}/{metric}_last.pth")
                 print("save last metric model")
         print(
-            "current epoch: {} current accuracy: {:.4f} best accuracy: {:.4f} at epoch {}".format(
+            "current epoch: {} current f1 score: {:.4f} best f1 score: {:.4f} at epoch {}".format(
                 epoch + 1, metric, best_metric, best_metric_epoch
             )
         )
-        writer.add_scalar("val_accuracy", metric, epoch + 1)
+        # writer.add_scalar("val_f1", metric, epoch + 1)
 
         # early stop 
         if early_stop and trigger_times >= early_stop:
@@ -523,7 +529,107 @@ def train(model, device, data_num, epochs, optimizer, loss_function, train_loade
     print(f"train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
     config.best_metric = best_metric
     config.best_metric_epoch = best_metric_epoch
-    writer.close()
+    # writer.close()
+    #print(f'training_torch best_metric:{best_metric}',flush =True)
+    #print(f'training_torch config.best_metric:{config.best_metric}',flush =True)
+    return model
+
+def train_seg(model, device, data_num, epochs, optimizer, loss_function, train_loader, valid_loader, early_stop, scheduler, check_path):
+    # Let ini config file can be writted
+    #global best_metric
+    #global best_metric_epoch
+    #val_interval = 2
+    best_metric = -1
+    best_metric_epoch = -1
+    trigger_times = 0
+    if early_stop == 0:
+        early_stop = None
+    #epoch_loss_values = list()
+    
+    # writer = SummaryWriter()
+    for epoch in range(epochs):
+        print("-" * 10)
+        print(f"epoch {epoch + 1}/{epochs}")
+        # record ram memory used
+        process = psutil.Process(os.getpid())
+        print(f'RAM used:{process.memory_info().rss/ 1024 ** 3} GB')
+        model.train()
+        epoch_loss = 0
+        step = 0
+        first_start_time = time.time()
+        for batch_data in train_loader:
+            step += 1
+            if batch_data['label'].dim() == 1:
+                labels = batch_data['label'].long().to(device)
+            else:
+                labels = batch_data['label'].float().to(device)
+            inputs = batch_data['image'].to(device)
+            seg = batch_data['seg'].to(device)
+            
+            # seg to 64,64,32
+            new_size = seg.shape[2] // 2, seg.shape[3] // 2, seg.shape[4] // 2
+            # nearest don't change the 0 or 1 label
+            seg = F.interpolate(seg.float(), size=new_size, mode='nearest')
+            optimizer.zero_grad()
+            #inputs, labels = Variable(inputs), Variable(labels)
+            if model.__class__.__name__ == ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+                inputs = inputs.permute(0, 1, 4, 2, 3)
+
+            cls_output, seg_output = model(inputs)
+            # Only positve have mask
+            labels_expanded = labels.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            seg = seg * labels_expanded
+
+            loss = loss_function(seg_output, seg, cls_output, labels)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            epoch_len = data_num // train_loader.batch_size
+            # print(f"{step}/{epoch_len}, train_loss: {loss.item():.4f}")
+            # writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
+        epoch_loss /= step
+        config.epoch_loss_values.append(epoch_loss)
+        print(f"epoch {epoch + 1} average loss: {epoch_loss:.7f}")
+        final_end_time = time.time()
+        hours, rem = divmod(final_end_time-first_start_time, 3600)
+        minutes, seconds = divmod(rem, 60)
+        print(f'one epoch runtime:{int(minutes)}:{seconds}')
+        # Early stopping & save best weights by using validation
+        metric = validation_seg(model, valid_loader, device)
+        scheduler.step(metric)
+
+        # checkpoint setting
+        if metric > best_metric:
+            # reset trigger_times
+            trigger_times = 0
+            best_metric = metric
+            best_metric_epoch = epoch + 1
+            torch.save(model.state_dict(), f"{check_path}/{best_metric}.pth")
+            print('trigger times:', trigger_times)
+            print("saved new best metric model")
+        else:
+            trigger_times += 1
+            print('trigger times:', trigger_times)
+            # Save last 3 epoch weight
+            if early_stop and early_stop - trigger_times <= 3 or epochs - epoch <= 3:
+                torch.save(model.state_dict(), f"{check_path}/{metric}_last.pth")
+                print("save last metric model")
+        print(
+            "current epoch: {} current f1 score: {:.4f} best f1 score: {:.4f} at epoch {}".format(
+                epoch + 1, metric, best_metric, best_metric_epoch
+            )
+        )
+        # writer.add_scalar("val_f1", metric, epoch + 1)
+
+        # early stop 
+        if early_stop and trigger_times >= early_stop:
+            print('Early stopping!\nStart to test process.')
+            break
+        
+    print(f"train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
+    config.best_metric = best_metric
+    config.best_metric_epoch = best_metric_epoch
+    # writer.close()
     #print(f'training_torch best_metric:{best_metric}',flush =True)
     #print(f'training_torch config.best_metric:{config.best_metric}',flush =True)
     return model
@@ -574,9 +680,15 @@ def train_mul_fpn(model, device, data_num, epochs, optimizer, loss_function, tra
             input_kid = torch.cat((input_kid_r,input_kid_l), dim=-1)
             if attention_mask:
                 mask_kid = torch.cat((mask_kid_r,mask_kid_l), dim=-1)
-                input_liv = torch.cat((input_liv, mask_liv), dim=1)
-                input_spl = torch.cat((input_spl, mask_spl), dim=1)
-                input_kid = torch.cat((input_kid, mask_kid), dim=1)
+
+                # 將mask取實際的img
+                mask_crop_liv = torch.where(mask_liv != 1, torch.tensor(0), input_liv)
+                mask_crop_spl = torch.where(mask_spl != 1, torch.tensor(0), input_spl)
+                mask_crop_kid = torch.where(mask_kid != 1, torch.tensor(0), input_kid)
+
+                input_liv = torch.cat((input_liv, mask_crop_liv), dim=1)
+                input_spl = torch.cat((input_spl, mask_crop_spl), dim=1)
+                input_kid = torch.cat((input_kid, mask_crop_kid), dim=1)
                 
             optimizer.zero_grad()
                 
@@ -939,11 +1051,13 @@ def valid_mul_fpn(model, val_loader, device, eval_score='total_acc', use_amp=Fal
 def validation(model, val_loader, device):
     #metric_values = list()
     model.eval()
+    all_preds = []
+    all_labels = []
     with torch.no_grad():
-        num_correct = 0.0
-        metric_count = 0
-        total_labels = 0
-        num_correct_labels = 0.0
+        # num_correct = 0.0
+        # metric_count = 0
+        # total_labels = 0
+        # num_correct_labels = 0.0
         for batch_data in val_loader:
                 # kidney
             if "image_r" in batch_data:
@@ -962,20 +1076,100 @@ def validation(model, val_loader, device):
                 val_images = torch.cat((val_images, mask), dim=1)
 
             val_labels = batch_data['label'].to(device)
+            if model.__class__.__name__ in ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+                val_images = val_images.permute(0, 1, 4, 2, 3)
             val_outputs = model(val_images)
             # print(val_outputs.size())
             # base on AngleLoss
             if isinstance(val_outputs, tuple):
                 val_outputs = AngleLoss_predict()(val_outputs)
-                
-            predicted_indices = torch.argmax(val_outputs, dim=1)
-            actual_indices = torch.argmax(val_labels, dim=1)
-            correct_predictions = torch.eq(predicted_indices, actual_indices)
-            num_correct += correct_predictions.sum().item()
-            metric_count += val_outputs.size(0)
 
-        metric = num_correct / metric_count
+            predicted_indices = torch.argmax(val_outputs, dim=1)
+            # 確認label是不是one-hot
+            if val_labels.dim() == 2:  
+                actual_indices = torch.argmax(val_labels, dim=1)
+            else:
+                actual_indices = val_labels
+            all_preds.append(predicted_indices.cpu().numpy())
+            all_labels.append(actual_indices.cpu().numpy())
+        #     correct_predictions = torch.eq(predicted_indices, actual_indices)
+        #     num_correct += correct_predictions.sum().item()
+        #     metric_count += val_outputs.size(0)
+
+        # metric = num_correct / metric_count
+        all_preds = np.concatenate(all_preds)
+        all_labels = np.concatenate(all_labels)
+        # 使用 'weighted' 平均來處理多類別問題不平衡
+        if val_labels.dim() == 2:
+            precision = precision_score(all_labels, all_preds, average='weighted')  
+            recall = recall_score(all_labels, all_preds, average='weighted')
+            f1 = f1_score(all_labels, all_preds, average='weighted')
+        else:
+            precision = precision_score(all_labels, all_preds, pos_label=1)
+            recall = recall_score(all_labels, all_preds, pos_label=1)
+            f1 = f1_score(all_labels, all_preds, pos_label=1)
+        accuracy = accuracy_score(all_labels, all_preds)
+        metric = f1
         config.metric_values.append(metric)
+        print(f'Validation percision:{precision}, recall:{recall}, accuracy:{accuracy}, f1 score:{f1}')
+        #print(f'validation metric:{config.metric_values}',flush =True)
+    return metric
+
+def validation_seg(model, val_loader, device):
+    #metric_values = list()
+    model.eval()
+    all_preds = []
+    all_labels = []
+    total_seg_loss = 0 
+    with torch.no_grad():
+        for batch_data in val_loader:
+            val_images = batch_data['image'].to(device)
+            seg = batch_data['seg'].to(device)
+            val_labels = batch_data['label'].to(device)
+
+            if model.__class__.__name__ in ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+                val_images = val_images.permute(0, 1, 4, 2, 3)
+
+            cls_output, seg_output = model(val_images)
+            new_size = seg.shape[2] // 2, seg.shape[3] // 2, seg.shape[4] // 2
+            # nearest don't change the 0 or 1 label
+            seg = F.interpolate(seg.float(), size=new_size, mode='nearest')
+            # Segmentation
+            # multiclass
+            seg_loss = AMSELoss(label_type='multiclass')(seg_output, seg)
+            total_seg_loss += seg_loss.item()
+
+            # classification
+            predicted_indices = torch.argmax(cls_output, dim=1)
+            # 確認label是不是one-hot
+            if val_labels.dim() == 2:  
+                actual_indices = torch.argmax(val_labels, dim=1)
+            else:
+                actual_indices = val_labels
+            all_preds.append(predicted_indices.cpu().numpy())
+            all_labels.append(actual_indices.cpu().numpy())
+        #     correct_predictions = torch.eq(predicted_indices, actual_indices)
+        #     num_correct += correct_predictions.sum().item()
+        #     metric_count += val_outputs.size(0)
+
+        # metric = num_correct / metric_count
+        all_preds = np.concatenate(all_preds)
+        all_labels = np.concatenate(all_labels)
+        # 使用 'weighted' 平均來處理多類別問題不平衡
+        if val_labels.dim() == 2:
+            precision = precision_score(all_labels, all_preds, average='weighted')  
+            recall = recall_score(all_labels, all_preds, average='weighted')
+            f1 = f1_score(all_labels, all_preds, average='weighted')
+        else:
+            precision = precision_score(all_labels, all_preds, pos_label=1)
+            recall = recall_score(all_labels, all_preds, pos_label=1)
+            f1 = f1_score(all_labels, all_preds, pos_label=1)
+        accuracy = accuracy_score(all_labels, all_preds)
+
+        avg_seg_loss = total_seg_loss / len(val_loader)
+        metric = f1
+        config.metric_values.append(metric)
+        print(f'Validation percision:{precision}, recall:{recall}, accuracy:{accuracy}, f1 score:{f1}, AMSE loss:{avg_seg_loss}')
         #print(f'validation metric:{config.metric_values}',flush =True)
     return metric
 
@@ -1131,8 +1325,12 @@ class FocalLoss(nn.Module):
         :param labels:  实际类别. size:[B,N] or [B]
         :return:
         """        
-        # assert preds.dim()==2 and labels.dim()==1        
-        preds = preds.view(-1,preds.size(-1))        
+        # assert preds.dim()==2 and labels.dim()==1
+        # inference part
+        if labels.dim()==1:
+            labels = F.one_hot(labels, num_classes=preds.size(-1)).float()
+        preds = preds.view(-1,preds.size(-1))
+
         if self.use_softmax:
             loss = self.softmax_focal_loss(preds, labels, self.gamma, self.alpha)
         else:
@@ -1183,6 +1381,77 @@ class FocalLoss(nn.Module):
             loss = alpha_factor * loss
 
         return loss
+
+class AMSELoss(nn.Module):
+    def __init__(self, label_type, weight=None):
+        super(AMSELoss, self).__init__()
+        self.weight = weight
+        self.label_type = label_type
+    def forward(self, pred, target):
+        # 假設 pred 是預測的激活圖（CAM），target 是真實標籤
+        # pred 和 target 的 shape (batch_size, num_classes, H, W, D)
+
+        if self.label_type == 'binary' or self.label_type == 'multiclass':
+            T_pred = torch.softmax(pred, dim=1)
+        elif self.label_type == 'multilabel':
+            T_pred = torch.sigmoid(pred)
+            
+        mse_loss = (T_pred - target) ** 2
+        
+        if self.weight is not None:
+            # if self.weight.dim() == 1:
+            # 將權重擴展至與 MSE Loss 相同的維度
+            weight = self.weight.view(1, -1, 1, 1, 1)  # 將權重形狀變為 (1, num_callsse, 1, 1, 1)
+            mse_loss = mse_loss * weight  # 對每個樣本/像素加權
+        
+        # 計算分子部分：平方誤差
+        numerator = torch.sum(mse_loss, dim=(2, 3, 4))  
+        
+        # 計算分母部分：預測值和真實值的總和
+        denominator = torch.sum(T_pred, dim=(2, 3, 4)) + torch.sum(target, dim=(2, 3, 4)) 
+        
+        # 防止分母為 0
+        denominator = torch.clamp(denominator, min=1e-5)  # 避免分母為 0
+        
+        # 計算最終的 AMSE 損失
+        loss = torch.mean(numerator / denominator)  # 對 batch 和類別進行平均
+        
+        return loss
+
+class CombinedLoss(nn.Module):
+    def __init__(self, weight, label_type, alpha=0.5, beta=0.5, seg='amse', cls='focal'):
+        """
+        alpha: AMSE 的權重
+        beta: Cross Entropy 的權重
+        """
+        super(CombinedLoss, self).__init__()
+        self.amse_loss = AMSELoss(weight=weight, label_type=label_type)
+        self.ce_loss = nn.CrossEntropyLoss(weight=weight)
+        self.label_type = label_type
+        # self.focal_loss = FocalLoss(gamma=2, alpha=0.25, use_softmax=True, weight=weight)
+        self.alpha = alpha  # Class loss 的權重
+        self.beta = beta    # Segmentation loss 的權重
+        self.seg = seg
+        self.cls = cls
+        self.weight = weight
+
+    def forward(self, seg_output, seg_target, cls_output, cls_target):
+        if self.seg == 'amse':
+            seg_loss = self.amse_loss(seg_output, seg_target)
+        
+        if self.cls == 'focal':
+            if self.label_type == 'binary' or self.label_type == 'multiclass':
+                focal_loss = FocalLoss(gamma=2, alpha=0.25, use_softmax=True, weight=self.weight)
+            elif label_type == 'multilabel':
+                focal_loss = FocalLoss(gamma=2, alpha=0.25, use_softmax=False, weight=self.weight)
+            cls_loss = focal_loss(cls_output, cls_target)
+        elif self.cls == 'ce':
+            cls_loss = self.ce_loss(cls_output, cls_target)
+        
+        total_loss = self.alpha * seg_loss + self.beta * cls_loss
+        
+
+        return total_loss
 
 class ChannelAttentionModule(nn.Module):
     def __init__(self, channel, ratio=4):

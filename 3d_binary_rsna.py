@@ -10,8 +10,8 @@ import torch
 from torch.autograd import Variable
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
-from torchsummary import summary
+# from torch.utils.tensorboard import SummaryWriter
+# from torchsummary import summary
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import KFold
 import matplotlib.pyplot as plt
@@ -24,8 +24,10 @@ import sys
 # 路徑要根據你的docker路徑來設定
 sys.path.append("/tf/jacky831006/ABD_classification/model/")
 from efficientnet_3d.model_3d import EfficientNet3D
-from efficientnet_3d.Efficient3D_BIFPN import EfficientNet_FPN
+from efficientnet_3d.Efficient3D_BIFPN import EfficientNet_FPN, UNetEfficientFPN, UNetEfficient
 from resnet_3d import resnet_3d
+from resnet_3d.resnet_3d_new import resnet101, ResNetWithClassifier
+from SuPreM.model.Universal_model import SwinUNETRClassifier
 # 此架構參考這篇
 # https://github.com/fei-aiart/NAS-Lung
 sys.path.append("/tf/jacky831006/ABD_classification/model/NAS-Lung/") 
@@ -37,7 +39,7 @@ import configparser
 import gc
 import math
 import json
-from utils.training_torch_utils import train, validation, plot_loss_metric, FocalLoss, ImgAggd, AttentionModel, AttentionModel_new, Dulicated_new
+from utils.training_torch_utils import train, validation, train_seg, validation_seg, plot_loss_metric, FocalLoss, CombinedLoss, ImgAggd, AttentionModel, AttentionModel_new, Dulicated_new
 import pickle
 # Data augmnetation module (based on MONAI)
 from monai.networks.nets import UNet, densenet, SENet, ViT
@@ -61,17 +63,20 @@ from monai.transforms import (
     Invertd,
     FillHoles,
     Resized,
-    RepeatChanneld
+    RepeatChanneld,
+    HistogramNormalized
 )
 import functools
 # let all of print can be flush = ture
 print = functools.partial(print, flush=True)
 
 def get_parser():
-    parser = argparse.ArgumentParser(description='spleen classification')
+    parser = argparse.ArgumentParser(description='Abdomen injury classification & segmentation')
     parser.add_argument('-f', '--file', help=" The config file name. ", type=str)
     parser.add_argument('-c', '--class_type', help=" The class of data. (liver, kidney, spleen, all) ", type=str)
-    parser.add_argument('-lb', '--label_type', help=" The label of data. (binary or multiple) ", type=str)
+    parser.add_argument('-lb', '--label_type', help=" The label of data. (binary, multilabel, multiclass) ", type=str)
+    parser.add_argument('-s', '--seg', help=" The model, which includes segmentation or not. ", action='store_true')
+    parser.add_argument('-t', '--test', help=" Verify using fifty data samples", action='store_true')
     return parser
 # 對應不同資料有不同路徑與處理
 # 目前以data_progress_all為主
@@ -84,57 +89,72 @@ def get_parser():
 # cropping_dilation : 對Totalsegmatator出來的結果進行dilation
 # bbox : 對Totalsegmatator出來的結果進行dilation並且轉換成bounding box
 
+def get_label(row, class_type, label_type):
+    if label_type == 'binary':
+        return 0 if row[f'{class_type}_healthy'] == 1 else 1
+    else:
+        return np.array([row[f"{class_type}_healthy"], row[f"{class_type}_low"], row[f"{class_type}_high"]])
 
-def data_progress_all(file, dicts, class_type, label_type, image_type, attention_mask=False):
+def data_progress_all(file, dicts, class_type, label_type, image_type, attention_mask=False, seg=False):
     dicts = []
-    if image_type=='bbox':
-        dir = "/SSD/TotalSegmentator/rsna_selected_crop_bbox"
-    elif image_type=='cropping_convex':
-        dir = "/Data/TotalSegmentator/rsna_selected_crop_dilation_new"
-    
-    mask_dir = "/SSD/rsna-2023/train_images_new"
+    # Seg: Using Segmentation with whole image
+    # attention_mask: Using attentional mask by concate in channel 
+    if seg:
+        # Crop z axis by abd organ
+        dir = '/Data/TotalSegmentator/rsna_select_z_whole_image'
+        mask_dir = "/Data/TotalSegmentator/rsna_gaussian_mask"
+    else:
+        if image_type == 'bbox':
+            dir = "/SSD/TotalSegmentator/rsna_selected_crop_bbox"
+        elif image_type == 'cropping_convex':
+            dir = "/Data/TotalSegmentator/rsna_selected_crop_dilation_new"
+        elif image_type == 'gaussian_filter_channel_connected':
+            dir = "/Data/TotalSegmentator/rsna_selected_crop_gaussian_channel"
+        mask_dir = "/SSD/rsna-2023/train_images_new"
+
     for index, row in file.iterrows():
         # dirs = os.path.dirname(row['file_paths'])
         output = os.path.basename(row['file_paths'])[:-7]
-        image_liv = os.path.join(dir,"liv",output)+".nii.gz"
-        image_spl = os.path.join(dir,"spl",output)+".nii.gz"
-        image_kid_r = os.path.join(dir,"kid",output)+"_r.nii.gz"
-        image_kid_l = os.path.join(dir,"kid",output)+"_l.nii.gz"
         ID = str(row['patient_id'])
         Slice_ID = row['file_paths'].split('/')[-2]
-        mask_liv = os.path.join(mask_dir,ID,Slice_ID,"liver.nii.gz")
-        mask_spl = os.path.join(mask_dir,ID,Slice_ID,"spleen.nii.gz")
-        mask_kid_r = os.path.join(mask_dir,ID,Slice_ID,"kidney_right.nii.gz")
-        mask_kid_l = os.path.join(mask_dir,ID,Slice_ID,"kidney_left.nii.gz")
+        
+        image_seg =  os.path.join(dir,output)+".nii.gz" # Seg image all class in one dir
+        label = get_label(row, class_type, label_type)
 
         if class_type=='liver':
-            if label_type == 'binary':
-                label = 0 if row['liver_healthy'] == 1 else 1
-            else:
-                label = np.array([row["liver_healthy"],row["liver_low"],row["liver_high"]])
+            image_liv = os.path.join(dir,"liv",output)+".nii.gz"
             if attention_mask:
-                dicts.append({'image':image_liv, 'mask':mask_liv, 'label':label})
+                mask = os.path.join(mask_dir,ID,Slice_ID,"liver.nii.gz")
+                dicts.append({'image':image_liv, 'mask':mask, 'label':label})
+            elif seg:
+                mask = os.path.join(mask_dir,"liv",output)+".nii.gz"
+                dicts.append({'image':image_seg, 'seg':mask, 'label':label})
             else:
                 dicts.append({'image':image_liv, 'label':label})
         elif class_type=='spleen':
-            if label_type == 'binary':
-                label = 0 if row['spleen_healthy'] == 1 else 1
-            else:
-                label = np.array([row["spleen_healthy"],row["spleen_low"],row["spleen_high"]])
+            image_spl = os.path.join(dir,"spl",output)+".nii.gz"
             if attention_mask:
-                dicts.append({'image':image_spl, 'mask':mask_spl, 'label':label})
+                mask = os.path.join(mask_dir,ID,Slice_ID,"spleen.nii.gz")
+                dicts.append({'image':image_spl, 'mask':mask, 'label':label})
+            elif seg:
+                mask = os.path.join(mask_dir,"spl",output)+".nii.gz"
+                dicts.append({'image':image_seg, 'seg':mask, 'label':label})
             else:
                 dicts.append({'image':image_spl, 'label':label})
         elif class_type=='kidney':
             # 目前kidney都以單邊受傷為主
             # Negative資料可能會沒有kidney 要做判斷
             # label = int(row['kidney_inj_no'])
-            if label_type == 'binary':
-                label = 0 if row['kidney_healthy'] == 1 else 1
-            else:
-                label = np.array([row["kidney_healthy"],row["kidney_low"],row["kidney_high"]])
+            image_kid_r = os.path.join(dir,"kid",output)+"_r.nii.gz"
+            image_kid_l = os.path.join(dir,"kid",output)+"_l.nii.gz"
             if attention_mask:
-                dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'mask_r':mask_kid_r,'mask_l':mask_kid_l,'label':label})
+                mask_r = os.path.join(mask_dir,ID,Slice_ID,"kidney_right.nii.gz")
+                mask_l = os.path.join(mask_dir,ID,Slice_ID,"kidney_left.nii.gz")
+                dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'mask_r':mask_r,'mask_l':mask_l,'label':label})
+            elif seg:
+                mask_r = os.path.join(mask_dir,"kid",output)+"_r.nii.gz"
+                mask_l = os.path.join(mask_dir,"kid",output)+"_l.nii.gz"
+                dicts.append({'image':image_seg, 'seg_r':mask_r, 'seg_l':mask_l, 'label':label})
             else:
                 dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'label':label})
             
@@ -305,7 +325,11 @@ def train_valid_test_split(df, ratio=(0.7, 0.1, 0.2), seed=0, test_fix=None):
         return train_df, valid_df, test_df
 
 def get_transforms(keys, size, prob, sigma_range, magnitude_range, translate_range, rotate_range, scale_range, valid=False):
+    # Seg: Using Segmentation with whole image
+    # mask: Using attentional mask by concate in channel
+    # only kidney have right, left side
     if 'image_r' in keys and 'image_l' in keys:
+        # right, left side concate in z axis, so z axis size divide by 2
         other_key = ["image_r","image_l"]
         size = size[0],size[1],size[2]//2
     else:
@@ -320,6 +344,14 @@ def get_transforms(keys, size, prob, sigma_range, magnitude_range, translate_ran
         CropForegroundd_list = [
         CropForegroundd(keys=['image','mask'], source_key='image')
         ]
+    elif 'seg_r' in keys:
+        CropForegroundd_list = [
+        CropForegroundd(keys=['image','seg_r','seg_l'], source_key='image')
+        ]
+    elif 'seg' in keys:
+        CropForegroundd_list = [
+        CropForegroundd(keys=['image','seg'], source_key='image')
+        ]
     else:
         CropForegroundd_list = [CropForegroundd(keys=[key], source_key=key) for key in keys]
         
@@ -328,11 +360,13 @@ def get_transforms(keys, size, prob, sigma_range, magnitude_range, translate_ran
             EnsureChannelFirstd(keys=keys),
             # ImgAggd(keys=["image","bbox"], Hu_range=img_hu),
             ScaleIntensityRanged(
-                #keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
-                keys=other_key, a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+                # keys=["image"], a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True,
+                # keys=other_key, a_min=-50, a_max=250, b_min=0.0, b_max=1.0, clip=True,
+                keys=other_key, a_min=-50, a_max=250, b_min=0.0, b_max=255.0, clip=True,
             ),
             #Dulicated_new(keys=["image"], num_samples=num_samples, pos_sel=True),
             #RepeatChanneld(keys=["image","label"], repeats = num_sample),
+            HistogramNormalized(keys=other_key, num_bins=64, min=0, max=1.0),
             Spacingd(keys=keys, pixdim=(1.5, 1.5, 2.0), mode=("bilinear")),
             Orientationd(keys=keys, axcodes="RAS"),
             *CropForegroundd_list, # Expand the list here
@@ -361,12 +395,15 @@ def run_once(times=0):
     # reset config parameter
     config.initialize()
 
-    train_df, valid_df = train_valid_test_split(df_all, ratio = (0.8, 0.2), seed = seed, test_fix = True)
-    
+    if test_fix:
+        global test_df
+        train_df, valid_df = train_valid_test_split(df_all, ratio = (0.8, 0.2), seed = seed, test_fix = True)
+    else:
+        train_df, valid_df, test_df = train_valid_test_split(df_all, ratio = data_split_ratio, seed = seed)
 
-    train_data_dicts = data_progress_all(train_df, 'train_data_dict', class_type, label_type, image_type, attention_mask)
-    valid_data_dicts = data_progress_all(valid_df, 'valid_data_dict', class_type, label_type, image_type, attention_mask)
-    test_data_dicts  = data_progress_all(test_df, 'test_data_dict',   class_type, label_type, image_type, attention_mask)
+    train_data_dicts = data_progress_all(train_df, 'train_data_dict', class_type, label_type, image_type, attention_mask, seg)
+    valid_data_dicts = data_progress_all(valid_df, 'valid_data_dict', class_type, label_type, image_type, attention_mask, seg)
+    test_data_dicts  = data_progress_all(test_df, 'test_data_dict',   class_type, label_type, image_type, attention_mask, seg)
     #with open('/tf/jacky831006/ABD_data/train.pickle', 'wb') as f:
     #    pickle.dump(train_data_dicts, f)
 
@@ -385,51 +422,73 @@ def run_once(times=0):
     # bbox 則代表input除了原始的影像外，還加入bounding box影像藉由channel增維
     if label_type == 'binary':
         label_num = 2
-    else:
+    elif label_type == 'multicalss':
         label_num = 3
+    elif label_type == 'multicalss':
+        label_num = 9 # (kid,spl,liv) X (_healty,_low,_high)
+
+    if attention_mask:
+        input_channel = 2
+    else:
+        input_channel = 1
 
     if architecture == 'densenet':
         if normal_structure:
             # Normal DenseNet121
-            if attention_mask:
-                model = densenet.densenet121(spatial_dims=3, in_channels=2, out_channels=label_num).to(device)
-            else:
-                model = densenet.densenet121(spatial_dims=3, in_channels=1, out_channels=label_num).to(device)
+            model = densenet.densenet121(spatial_dims=3, in_channels=input_channel, out_channels=label_num).to(device)
         else:
-            if attention_mask:
-            # Delete last dense block
-                model = densenet.DenseNet(spatial_dims=3, in_channels=2, out_channels=label_num, block_config=(6, 12, 40)).to(device)
-            else:
-                model = densenet.DenseNet(spatial_dims=3, in_channels=1, out_channels=label_num, block_config=(6, 12, 40)).to(device)
-
+            model = densenet.DenseNet(spatial_dims=3, in_channels=input_channel, out_channels=label_num, block_config=(6, 12, 40)).to(device)
+           
     elif architecture == 'resnet':
-        if attention_mask:
-            model = resnet_3d.generate_model(101,normal=normal_structure,n_input_channels=2,n_classes=label_num).to(device)
-        else:
-            model = resnet_3d.generate_model(101,normal=normal_structure,n_classes=label_num).to(device)
+        # pretrain resnet input z, x, y need to translate
+        base_model = resnet101(sample_input_W=size[0], sample_input_H=size[1], sample_input_D=size[2], num_input=input_channel, num_seg_classes=label_num, shortcut_type='B').to(device)
+        # model = resnet_3d.generate_model(101,normal=normal_structure,n_classes=label_num).to(device)
+        model = ResNetWithClassifier(base_model, num_classes=label_num).to(device)
+        load_weight_path = '/tf/jacky831006/ABD_classification/pretrain_weight/resnet_101.pth'
+        net_dict = model.state_dict()
+        pretrain = torch.load(load_weight_path)
+        pretrain_dict = {new_key: v for k, v in pretrain['state_dict'].items() if (new_key := k.replace('module.', 'base_model.')) in net_dict.keys()}
+        net_dict.update(pretrain_dict)
+        model.load_state_dict(net_dict)
 
     elif architecture == 'efficientnet':
-        if attention_mask:
-            model = EfficientNet3D.from_name(f"efficientnet-{structure_num}", in_channels=2, num_classes=label_num, image_size=size, normal=normal_structure).to(device)
-        else:
-            model = EfficientNet3D.from_name(f"efficientnet-{structure_num}", in_channels=1, num_classes=label_num, image_size=size, normal=normal_structure).to(device)
-
+        model = EfficientNet3D.from_name(f"efficientnet-{structure_num}", in_channels=input_channel, num_classes=label_num, image_size=size, normal=normal_structure).to(device)
+    
     elif architecture == 'CBAM':
         if size[0] == size[1] == size[2]:
-            if attention_mask:
-                model = ConvRes(size[0], [[64, 64, 64], [128, 128, 256], [256, 256, 256, 512]], input_channel=2, num_classes=label_num ,normal=normal_structure).to(device)
-            else:
-                model = ConvRes(size[0], [[64, 64, 64], [128, 128, 256], [256, 256, 256, 512]], num_classes=label_num ,normal=normal_structure).to(device)
+            model = ConvRes(size[0], [[64, 64, 64], [128, 128, 256], [256, 256, 256, 512]], input_channel=input_channel, num_classes=label_num ,normal=normal_structure).to(device)
         else:
             raise RuntimeError("CBAM model need same size in x,y,z axis")
     
     elif architecture == 'efficientnet_fpn':
-        model = EfficientNet_FPN(size=size, structure_num=structure_num, class_num=label_num, fpn_type=fpn_type, in_channels=2 if attention_mask else 1).to(device)
+        model = EfficientNet_FPN(size=size, structure_num=structure_num, class_num=label_num, fpn_type=fpn_type, in_channels=input_channel).to(device)
     
+    elif architecture == 'swintransformer':
+        # pretrain swintransformer input z, x, y need to translate
+        model = SwinUNETRClassifier(img_size=size,
+            in_channels=input_channel,
+            out_channels=label_num,
+            encoding='word_embedding'
+            ).to(device)
+        #Load pre-trained weights
+        checkpoint_path = '/tf/jacky831006/ABD_classification/pretrain_weight/supervised_suprem_swinunetr_2100.pth'
+        net_dict = model.state_dict()
+        checkpoint = torch.load(checkpoint_path)
+        load_dict = checkpoint['net']
+
+        pretrain_dict = {new_key: v for k, v in checkpoint['net'].items() if (new_key := k.replace('module.', '')) in net_dict.keys() and "organ_embedding" not in new_key}
+        net_dict.update(pretrain_dict)
+        model.load_state_dict(net_dict)
+    elif seg and architecture == 'efficientnet_fpn_unet':
+        model = UNetEfficientFPN(size=size, structure_num=structure_num, class_num=label_num, fpn_type=fpn_type, normal=False).to(device)
+    
+    elif seg and architecture == 'efficientnet_unet':
+        model = UNetEfficient(size=size, structure_num=structure_num, class_num=label_num, normal=normal_structure).to(device)
     # Mask attention block in CNN
-    if attention_mask:
-        dense = densenet.DenseNet(spatial_dims=3, in_channels=1, out_channels=2, block_config=(6, 12, 20)).to(device)
-        model = AttentionModel_new(2, size, model, dense, architecture).to(device)
+    # Old version
+    # if attention_mask:
+    #     dense = densenet.DenseNet(spatial_dims=3, in_channels=1, out_channels=2, block_config=(6, 12, 20)).to(device)
+    #     model = AttentionModel_new(2, size, model, dense, architecture).to(device)
         #model = AttentionModel(2, size, model, architecture).to(device)
     
     # Imbalance loss
@@ -456,9 +515,13 @@ def run_once(times=0):
         group_dict[name] = len(group) * num_samples
 
     if label_type == 'binary':
-        weights = torch.tensor([1/group_dict[1], 1/group_dict[0]]).to(device)
-    else:
+        # weights = torch.tensor([1/group_dict[1], 1/group_dict[0]]).to(device)
+        weights = torch.tensor([1/(group_dict[1] + 1e-6), 1/(group_dict[0] + 1e-6)]).to(device)
+    elif label_type ==  'multiclass':
         class_weights = [1.0, 2.0, 4.0]
+        weights = torch.FloatTensor(class_weights).to(device)
+    elif label_type == 'multilabel':
+        class_weights = [1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
         weights = torch.FloatTensor(class_weights).to(device)
     print(f'\npos:{group_dict[0]}, neg:{group_dict[1]}')
     # CBAM有自己的loss function
@@ -467,8 +530,14 @@ def run_once(times=0):
     elif loss_type == 'crossentropy':
         loss_function = torch.nn.CrossEntropyLoss(weight=weights)
     elif loss_type == 'focalloss':
-        loss_function = FocalLoss(gamma=2, alpha=0.25, use_softmax=True, weight=weights)
-
+        if label_type == 'binary' or label_type == 'multiclass':
+            loss_function = FocalLoss(gamma=2, alpha=0.25, use_softmax=True, weight=weights)
+        elif label_type == 'multilabel':
+            loss_function = FocalLoss(gamma=2, alpha=0.25, use_softmax=False, weight=weights)
+    elif loss_type == 'focal & amse':
+        loss_function = CombinedLoss(alpha=0.5, beta=0.5, seg='amse', cls='focal', weight=weights, label_type=label_type)
+    elif loss_type == 'ce & amse':
+        loss_function = CombinedLoss(alpha=0.5, beta=0.5, seg='amse', cls='ce', weight=weights, label_type=label_type)
     # Grid search
     if len(init_lr) == 1:
         optimizer = torch.optim.Adam(model.parameters(), init_lr[0])
@@ -483,13 +552,13 @@ def run_once(times=0):
 
     now = datetime.utcnow().strftime("%Y%m%d%H%M%S")               
     root_logdir = f"/tf/jacky831006/ABD_classification/tfboard/{class_type}/{label_type}"     
-    logdir = "{}/run-{}/".format(root_logdir, now) 
+    # logdir = "{}/run-{}/".format(root_logdir, now) 
 
     # tfboard file path
     # 創一個主目錄 之後在train內的sumamaryWriter都會以主目錄創下面路徑
-    writer = SummaryWriter(logdir)
-    if not os.path.isdir(logdir):
-        os.makedirs(logdir)
+    # writer = SummaryWriter(logdir)
+    # if not os.path.isdir(logdir):
+    #     os.makedirs(logdir)
     # check_point path
     check_path = f'/tf/jacky831006/ABD_classification/training_checkpoints/{class_type}/{label_type}/{now}'
     if not os.path.isdir(check_path):
@@ -505,8 +574,11 @@ def run_once(times=0):
     #test_model = train(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
     #                    val_loader, early_stop, init_lr, lr_decay_rate, lr_decay_epoch, check_path)
     
-
-    test_model = train(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
+    if seg:
+        test_model = train_seg(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
+                        val_loader, early_stop, scheduler, check_path)
+    else:
+        test_model = train(model, device, data_num, epochs, optimizer, loss_function, train_loader, \
                         val_loader, early_stop, scheduler, check_path)
                     
     # plot train loss and metric 
@@ -522,7 +594,7 @@ def run_once(times=0):
     test_ds = CacheDataset(data=test_data_dicts, transform=valid_transforms, cache_rate=1, num_workers=dataloader_num_workers)
     test_loader = DataLoader(test_ds, batch_size=testing_batch_size, num_workers=dataloader_num_workers)
     # validation is same as testing
-    print(f'Best accuracy:{config.best_metric}')
+    print(f'\nBest accuracy:{config.best_metric}')
     if config.best_metric != 0:
         load_weight = f'{check_path}/{config.best_metric}.pth'
         model.load_state_dict(torch.load(load_weight))
@@ -532,13 +604,17 @@ def run_once(times=0):
     file_list.append(now)
     epoch_list.append(config.best_metric_epoch)
 
-    test_acc = validation(model, test_loader, device)
+    if seg:
+        test_acc = validation_seg(model, test_loader, device)
+    else:
+        test_acc = validation(model, test_loader, device)
+
     test_accuracy_list.append(test_acc)
     del test_ds
     del test_loader
     gc.collect()
 
-    print(f'\n Best accuracy:{config.best_metric}, Best test accuracy:{test_acc}')
+    print(f'\n Best f1 score:{config.best_metric}, Best test f1 score:{test_acc}')
 
 
 if __name__ == '__main__':
@@ -546,6 +622,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     class_type = args.class_type
     label_type = args.label_type
+    seg = args.seg
+    test_check = args.test
     # 讀檔路徑，之後可自己微調
     if args.file.endswith('ini'):
         cfgpath = f'/tf/jacky831006/ABD_classification/config/{class_type}/{label_type}/{args.file}'
@@ -570,7 +648,7 @@ if __name__ == '__main__':
     architecture = conf.get('Data_Setting','architecture')
     if 'efficientnet' in architecture:
         structure_num = conf.get('Data_Setting', 'structure_num')
-    if architecture == 'efficientnet_fpn':
+    if 'efficientnet_fpn' in architecture :
         fpn_type = conf.get('Data_Setting', 'fpn_type')
     gpu_num = conf.getint('Data_Setting','gpu')
     seed = conf.getint('Data_Setting','seed')
@@ -591,10 +669,11 @@ if __name__ == '__main__':
     lr_decay_rate = conf.getfloat('Data_Setting','lr_decay_rate')
     lr_decay_epoch = conf.getint('Data_Setting','lr_decay_epoch')
     # cropping_convex, bbox
-    image_type = conf.get('Data_Setting','image_type')
+    image_type = conf.get('Data_Setting','image_type', fallback=None)
     loss_type = conf.get('Data_Setting','loss')
     # bbox = conf.getboolean('Data_Setting','bbox')
-    attention_mask = conf.getboolean('Data_Setting','attention_mask')
+    attention_mask = conf.getboolean('Data_Setting','attention_mask', fallback=False)
+    test_fix = conf.getboolean('Data_Setting','test_fix')
     # HU range: ex 0,100
     # img_hu = eval(conf.get('Data_Setting','img_hu'))
 
@@ -639,24 +718,34 @@ if __name__ == '__main__':
     All_data = All_data[~All_data['file_paths'].isin(no_seg_kid['file_paths'])]
     All_data = All_data[~All_data['file_paths'].isin(no_seg['file_paths'])]
 
-    All_data = All_data[~All_data.file_paths.isin(test_df.file_paths.values)]
-    df_all = All_data
+    if test_fix:
+        All_data = All_data[~All_data.file_paths.isin(test_df.file_paths.values)]
+
+    if test_check:
+        df_all = All_data[:50]
+    else:
+        df_all = All_data
     
     if attention_mask:
         if class_type =='kidney':
             keys = ["image_r","image_l","mask_r","mask_l"]
         else:
-            keys = ["image","mask"] 
+            keys = ["image","mask"]
+    elif seg:
+        if class_type =='kidney':
+            keys = ["image","seg_r","seg_l"]
+        else:
+            keys = ["image","seg"]
     else:
         if class_type =='kidney':
             keys = ["image_r","image_l"]
         else:
             keys = ["image"]
         
-        train_transforms = get_transforms(keys, size, prob, sigma_range, magnitude_range, 
-                                    translate_range, rotate_range, scale_range)
-        valid_transforms = get_transforms(keys, size, prob, sigma_range, magnitude_range, 
-                                    translate_range, rotate_range, scale_range, valid=True)
+    train_transforms = get_transforms(keys, size, prob, sigma_range, magnitude_range, 
+                                translate_range, rotate_range, scale_range)
+    valid_transforms = get_transforms(keys, size, prob, sigma_range, magnitude_range, 
+                                translate_range, rotate_range, scale_range, valid=True)
 
     # Training by cross validation
     accuracy_list = []

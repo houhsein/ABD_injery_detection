@@ -72,13 +72,27 @@ def test(model, testLoader, device):
     with torch.no_grad():
         num_correct = 0.0
         metric_count = 0
-        for testdata in testLoader:
-            test_images, test_labels = testdata['image'].to(device), testdata['label'].to(device)
-            if "bbox" in testdata:
-                bboxs = testdata['bbox'].to(device)
-                output = model(bboxs, test_images)
+        for batch_data in testLoader:
+            if "image_r" in batch_data:
+                image_r, image_l = batch_data['image_r'].to(device), batch_data['image_l'].to(device)
+                # z axis concated
+                test_images = torch.cat((image_r,image_l), dim=-1)
             else:
-                output = model(test_images)
+                test_images = batch_data['image'].to(device)
+
+            if "mask_r" in batch_data:
+                mask_r, mask_l = batch_data['mask_r'].to(device), batch_data['mask_l'].to(device)
+                mask = torch.cat((mask_r,mask_l), dim=-1)
+                test_images = torch.cat((test_images, mask), dim=1)
+            elif "mask" in batch_data:
+                mask = batch_data['mask'].to(device)
+                test_images = torch.cat((test_images, mask), dim=1)
+
+            test_labels = batch_data['label'].to(device)
+            if model.__class__.__name__ == ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+                test_images = test_images.permute(0, 1, 4, 2, 3)
+            output = model(test_images)
+
             if isinstance(output, tuple):
                 output = AngleLoss_predict()(output)
 
@@ -305,16 +319,20 @@ def Find_Optimal_Cutoff(target, predicted):
 def get_roc_CI(y_true, y_score):
 #     roc_curves, auc_scores = zip(*Parallel(n_jobs=4)(delayed(bootstrap_func)(i, y_true, y_score) for i in range(1000)))
     roc_curves, auc_scores, aupr_scores = [], [], []
-    for j in range(1000):
+    j = 0
+    while len(auc_scores) < 1000:
         yte_true_b, yte_pred_b = resample(y_true, y_score, replace=True, random_state=j)
-        roc_curve = metrics.roc_curve(yte_true_b, yte_pred_b)
-        auc_score = metrics.roc_auc_score(yte_true_b, yte_pred_b)
-        aupr_score = metrics.auc(*metrics.precision_recall_curve(yte_true_b, yte_pred_b)[1::-1])
+        if len(np.unique(yte_true_b)) == 2:
+            roc_curve = metrics.roc_curve(yte_true_b, yte_pred_b)
+            auc_score = metrics.roc_auc_score(yte_true_b, yte_pred_b)
+            aupr_score = metrics.auc(*metrics.precision_recall_curve(yte_true_b, yte_pred_b)[1::-1])
 
-        roc_curves.append(roc_curve)
-        auc_scores.append(auc_score)
-        aupr_scores.append(aupr_score)
-
+            roc_curves.append(roc_curve)
+            auc_scores.append(auc_score)
+            aupr_scores.append(aupr_score)
+        else:
+            pass
+        j += 1
     #print('Test AUC: {:.3f}'.format(metrics.roc_auc_score(y_true, y_score)))
     #print('Test AUC: ({:.3f}, {:.3f}) percentile 95% CI'.format(np.percentile(auc_scores, 2.5), np.percentile(auc_scores, 97.5))) 
     tprs = []
@@ -361,7 +379,7 @@ def multi_label_progress(arr, index_ranges, optimal_th_list=False):
         out_lst.append(one_list)
     return out_lst
 
-def plot_multi_class_roc(y_pre, y_label, n_classes, cls_type, dir_path, file_name):
+def plot_multi_class_roc(y_pre, y_label, n_classes, cls_type, dir_path, file_name, save=True):
     fig = plt.figure(figsize=(6, 6))
     lw = 2
     y_label = np.array(y_label)
@@ -385,6 +403,8 @@ def plot_multi_class_roc(y_pre, y_label, n_classes, cls_type, dir_path, file_nam
         plt.plot(optimal_point[0], optimal_point[1], marker = 'o', color='r')
         plt.text(optimal_point[0], optimal_point[1], f'Class {i} Threshold:{optimal_th:.3f}')
         plt.fill_between(mean_fpr, tprs_lower, tprs_upper, alpha=.1, color='b')
+        if n_classes == 2:
+            break
         
     ticks = np.linspace(0, 1, 11)
     plt.xticks(ticks)
@@ -397,9 +417,11 @@ def plot_multi_class_roc(y_pre, y_label, n_classes, cls_type, dir_path, file_nam
     plt.ylabel('True Positive Rate')
     plt.title(f'ROC-AUC of {cls_type} for each class')
     plt.legend(loc="lower right")
-    fig.savefig(f"{dir_path}/{file_name}_{cls_type}_roc.png")
-    plt.close()
-    # plt.show()
+    if save:
+        fig.savefig(f"{dir_path}/{file_name}_{cls_type}_roc.png")
+        plt.close()
+    else:
+        plt.show()
 
     return optimal_th_list
 

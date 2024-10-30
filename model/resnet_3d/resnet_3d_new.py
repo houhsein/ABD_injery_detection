@@ -117,6 +117,7 @@ class ResNet(nn.Module):
                  sample_input_D,
                  sample_input_H,
                  sample_input_W,
+                 num_input,
                  num_seg_classes,
                  shortcut_type='B',
                  no_cuda = False):
@@ -124,7 +125,7 @@ class ResNet(nn.Module):
         self.no_cuda = no_cuda
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv3d(
-            1,
+            num_input,
             64,
             kernel_size=7,
             stride=(2, 2, 2),
@@ -366,6 +367,29 @@ def generate_model(opt):
         return model, parameters
 
     return model, model.parameters()
+
+class ResNetWithClassifier(nn.Module):
+    def __init__(self, base_model, num_classes):
+        super(ResNetWithClassifier, self).__init__()
+        self.base_model = base_model  # 原始的 ResNet 模型
+
+        # 动态移除 conv_seg 层
+        if hasattr(self.base_model, 'conv_seg'):
+            del self.base_model.conv_seg
+
+        self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))  # 全局平均池化
+        self.fc = nn.Linear(base_model.layer4[0].conv1.out_channels * 4, num_classes)  # 全连接层
+
+    def forward(self, x):
+        for name, module in self.base_model.named_children():
+            if name == 'conv_seg':
+                continue  # 跳过 conv_seg 层
+            x = module(x)
+        x = self.avgpool(x)  # 池化
+        x = torch.flatten(x, 1)  # 展平
+        x = self.fc(x)  # 分类
+        return x
+
 
 class Resnet3D_3_input(nn.Module):
     def __init__(self, size, num_classes, device, normal=True):
