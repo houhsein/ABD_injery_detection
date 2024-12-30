@@ -89,7 +89,7 @@ def test(model, testLoader, device):
                 test_images = torch.cat((test_images, mask), dim=1)
 
             test_labels = batch_data['label'].to(device)
-            if model.__class__.__name__ == ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+            if model.__class__.__name__ in ["ResNetWithClassifier", "SwinUNETRClassifier", "ResNetWithClassifierAndSegmentation"]:
                 test_images = test_images.permute(0, 1, 4, 2, 3)
             output = model(test_images)
 
@@ -116,6 +116,86 @@ def test(model, testLoader, device):
         metric = num_correct / metric_count
         print("Test Accuracy: {}".format(num_correct / metric_count))
         return (predict_values)
+
+def test_seg(model, testLoader, device):
+    pre_first = True
+    model.eval()
+    all_preds = []
+    all_labels = []
+    total_seg_loss = 0 
+    with torch.no_grad():
+        for batch_data in testLoader:
+            test_images = batch_data['image'].to(device)
+
+            if all(k in batch_data for k in ('seg_liv', 'seg_spl', 'seg_kid')):
+                seg_spl = batch_data['seg_spl'].to(device)
+                seg_liv = batch_data['seg_liv'].to(device)
+                seg_kid = batch_data['seg_kid'].to(device)
+                seg = torch.cat([seg_spl, seg_liv, seg_kid], dim=1)
+            else:
+                seg = batch_data['seg'].to(device)
+
+            test_labels = batch_data['label'].to(device)
+ 
+            if model.__class__.__name__ in ["ResNetWithClassifier", "SwinUNETRClassifier", "ResNetWithClassifierAndSegmentation"]:
+                test_images = test_images.permute(0, 1, 4, 2, 3)
+
+            cls_output, seg_output = model(test_images)
+
+            new_size = seg.shape[2] // 2, seg.shape[3] // 2, seg.shape[4] // 2
+            if model.__class__.__name__ == "ResNetWithClassifierAndSegmentation":
+                new_size = 32, 32, 32
+            # nearest don't change the 0 or 1 label
+            seg = F.interpolate(seg.float(), size=new_size, mode='nearest')
+
+            # Segmentation
+            # 暫時使用multiclass
+            seg_loss = AMSELoss(label_type='multiclass')(seg_output, seg)
+            total_seg_loss += seg_loss.item()
+            
+            # classification
+            # Multilabel
+            if all(k in batch_data for k in ('seg_liv', 'seg_spl', 'seg_kid')):
+                cls_threshold = 0.5
+                pre = torch.sigmoid(cls_output).cpu().detach().numpy()
+                predicted_indices = (pre > cls_threshold).int()
+            # Bianry or Multiclass
+            else:
+                pre = torch.softmax(output,dim=1).cpu().detach().numpy()
+                predicted_indices = np.argmax(pre, axis=1)
+            actual_indices = test_labels.cpu().detach().numpy()
+            
+            all_preds.append(predicted_indices)
+            all_labels.append(actual_indices)
+
+            if pre_first:
+                pre_first = None
+                predict_values = pre
+            else:
+                predict_values = np.concatenate((predict_values,pre),axis=0)
+
+        all_preds = np.concatenate(all_preds)
+        all_labels = np.concatenate(all_labels)
+        # 使用 'weighted' 平均來處理多類別問題不平衡
+        # Multilabel or Multiclass
+        if test_labels.dim() == 2 or torch.any((test_labels != 0) & (test_labels != 1)):
+            precision = precision_score(all_labels, all_preds, average='weighted')  
+            recall = recall_score(all_labels, all_preds, average='weighted')
+            f1 = f1_score(all_labels, all_preds, average='weighted')
+        # Binary
+        else:
+            precision = precision_score(all_labels, all_preds, pos_label=1)
+            recall = recall_score(all_labels, all_preds, pos_label=1)
+            f1 = f1_score(all_labels, all_preds, pos_label=1)
+        accuracy = accuracy_score(all_labels, all_preds)
+
+        avg_seg_loss = total_seg_loss / len(val_loader)
+        metric = f1
+        config.metric_values.append(metric)
+        print(f'Testing percision:{precision}, recall:{recall}, accuracy:{accuracy}, f1 score:{f1}, AMSE loss:{avg_seg_loss}')
+        #print(f'validation metric:{config.metric_values}',flush =True)
+    return predict_values
+
 
 def test_mul_fpn(model, testLoader, device, use_amp=False, attention_mask=False):
     pre_first = True

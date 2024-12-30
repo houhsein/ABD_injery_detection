@@ -1,3 +1,8 @@
+'''
+Model from MedicalNet
+https://github.com/Tencent/MedicalNet
+'''
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -128,7 +133,7 @@ class ResNet(nn.Module):
             num_input,
             64,
             kernel_size=7,
-            stride=(2, 2, 2),
+            stride=(1, 2, 2),
             padding=(3, 3, 3),
             bias=False)
             
@@ -390,6 +395,36 @@ class ResNetWithClassifier(nn.Module):
         x = self.fc(x)  # 分类
         return x
 
+class ResNetWithClassifierAndSegmentation(nn.Module):
+    def __init__(self, base_model, num_classes):
+        super(ResNetWithClassifierAndSegmentation, self).__init__()
+        self.base_model = base_model  # 原始的 ResNet 模型
+
+        # 提取 conv_seg 层，用于分割
+        if hasattr(self.base_model, 'conv_seg'):
+            self.conv_seg = self.base_model.conv_seg
+        else:
+            raise AttributeError("Base model must have 'conv_seg' layer for segmentation output.")
+
+        self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))  # 分类的全局平均池化
+        self.fc = nn.Linear(base_model.layer4[0].conv1.out_channels * 4, num_classes)  # 分类头
+
+    def forward(self, x):
+        # 主干网络的特征提取
+        for name, module in self.base_model.named_children():
+            if name == 'conv_seg':
+                continue  # 跳过内置的 conv_seg 层
+            x = module(x)
+
+        # 分类分支
+        classification_input = self.avgpool(x)  # 分类分支池化
+        classification_input = torch.flatten(classification_input, 1)  # 展平
+        classification_output = self.fc(classification_input)  # 分类结果
+
+        # 分割分支
+        segmentation_output = self.conv_seg(x)  # 使用保留的 conv_seg
+
+        return classification_output, segmentation_output
 
 class Resnet3D_3_input(nn.Module):
     def __init__(self, size, num_classes, device, normal=True):

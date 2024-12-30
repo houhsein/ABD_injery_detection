@@ -564,22 +564,28 @@ def train_seg(model, device, data_num, epochs, optimizer, loss_function, train_l
             else:
                 labels = batch_data['label'].float().to(device)
             inputs = batch_data['image'].to(device)
-            seg = batch_data['seg'].to(device)
+            # Multi Class for organ
+            if all(k in batch_data for k in ('seg_liv', 'seg_spl', 'seg_kid')):
+                seg_spl = batch_data['seg_spl'].to(device)
+                seg_liv = batch_data['seg_liv'].to(device)
+                seg_kid = batch_data['seg_kid'].to(device)
+                seg = torch.cat([seg_spl, seg_liv, seg_kid], dim=1)
+            else:
+                seg = batch_data['seg'].to(device)
             
             # seg to 64,64,32
             new_size = seg.shape[2] // 2, seg.shape[3] // 2, seg.shape[4] // 2
+            if model.__class__.__name__ == "ResNetWithClassifierAndSegmentation":
+                new_size = 32, 32, 32
             # nearest don't change the 0 or 1 label
+            # maybe trilinear 
             seg = F.interpolate(seg.float(), size=new_size, mode='nearest')
             optimizer.zero_grad()
             #inputs, labels = Variable(inputs), Variable(labels)
-            if model.__class__.__name__ == ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+            if model.__class__.__name__ in ["ResNetWithClassifier", "SwinUNETRClassifier", "ResNetWithClassifierAndSegmentation"]:
                 inputs = inputs.permute(0, 1, 4, 2, 3)
 
             cls_output, seg_output = model(inputs)
-            # Only positve have mask
-            labels_expanded = labels.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-            seg = seg * labels_expanded
-
             loss = loss_function(seg_output, seg, cls_output, labels)
             loss.backward()
             optimizer.step()
@@ -1116,6 +1122,7 @@ def validation(model, val_loader, device):
     return metric
 
 def validation_seg(model, val_loader, device):
+    # 待改
     #metric_values = list()
     model.eval()
     all_preds = []
@@ -1124,28 +1131,45 @@ def validation_seg(model, val_loader, device):
     with torch.no_grad():
         for batch_data in val_loader:
             val_images = batch_data['image'].to(device)
-            seg = batch_data['seg'].to(device)
+            if all(k in batch_data for k in ('seg_liv', 'seg_spl', 'seg_kid')):
+                seg_spl = batch_data['seg_spl'].to(device)
+                seg_liv = batch_data['seg_liv'].to(device)
+                seg_kid = batch_data['seg_kid'].to(device)
+                seg = torch.cat([seg_spl, seg_liv, seg_kid], dim=1)
+            else:
+                seg = batch_data['seg'].to(device)
             val_labels = batch_data['label'].to(device)
 
-            if model.__class__.__name__ in ["ResNetWithClassifier", "SwinUNETRClassifier"]:
+            if model.__class__.__name__ in ["ResNetWithClassifier", "SwinUNETRClassifier", "ResNetWithClassifierAndSegmentation"]:
                 val_images = val_images.permute(0, 1, 4, 2, 3)
 
             cls_output, seg_output = model(val_images)
             new_size = seg.shape[2] // 2, seg.shape[3] // 2, seg.shape[4] // 2
+            if model.__class__.__name__ == "ResNetWithClassifierAndSegmentation":
+                new_size = 32, 32, 32
             # nearest don't change the 0 or 1 label
             seg = F.interpolate(seg.float(), size=new_size, mode='nearest')
             # Segmentation
-            # multiclass
-            seg_loss = AMSELoss(label_type='multiclass')(seg_output, seg)
+            # Use sigmoid
+            seg_loss = AMSELoss(label_type='binary')(seg_output, seg)
             total_seg_loss += seg_loss.item()
 
             # classification
-            predicted_indices = torch.argmax(cls_output, dim=1)
-            # 確認label是不是one-hot
-            if val_labels.dim() == 2:  
-                actual_indices = torch.argmax(val_labels, dim=1)
+            # Multilabel
+            if all(k in batch_data for k in ('seg_liv', 'seg_spl', 'seg_kid')):
+                cls_threshold = 0.5
+                cls_output_sig = torch.sigmoid(cls_output)
+                predicted_indices = (cls_output_sig > cls_threshold).int()
+            # Bianry or Multiclass
             else:
-                actual_indices = val_labels
+                predicted_indices = torch.argmax(cls_output, dim=1)
+            # 不確定一般binary有沒有使用one-hot label， 確認後可刪除
+            # # 確認label是不是one-hot
+            # if val_labels.dim() == 2:  
+            #     actual_indices = torch.argmax(val_labels, dim=1)
+            # else:
+            #     actual_indices = val_labels
+            actual_indices = val_labels
             all_preds.append(predicted_indices.cpu().numpy())
             all_labels.append(actual_indices.cpu().numpy())
         #     correct_predictions = torch.eq(predicted_indices, actual_indices)
@@ -1156,10 +1180,12 @@ def validation_seg(model, val_loader, device):
         all_preds = np.concatenate(all_preds)
         all_labels = np.concatenate(all_labels)
         # 使用 'weighted' 平均來處理多類別問題不平衡
-        if val_labels.dim() == 2:
+        # Multilabel or Multiclass
+        if val_labels.dim() == 2 or torch.any((val_labels != 0) & (val_labels != 1)):
             precision = precision_score(all_labels, all_preds, average='weighted')  
             recall = recall_score(all_labels, all_preds, average='weighted')
             f1 = f1_score(all_labels, all_preds, average='weighted')
+        # Binary
         else:
             precision = precision_score(all_labels, all_preds, pos_label=1)
             recall = recall_score(all_labels, all_preds, pos_label=1)
@@ -1366,51 +1392,61 @@ class FocalLoss(nn.Module):
         return loss
 
     def sigmoid_focal_loss(self, preds: torch.Tensor, labels: torch.Tensor, gamma: float = 2.0, alpha: Optional[float] = None):
-        # max_val = (-preds).clamp(min=0)
         preds = preds.view(-1)
         labels = labels.view(-1)
-        max_val = (-preds).clamp(min=0)
-        loss= preds - preds * labels + max_val + ((-max_val).exp() + (-preds - max_val).exp()).log()
-        invprobs = F.logsigmoid(-preds * (labels * 2 - 1))  # reduced chance of overflow
-        focal_weight = (invprobs * gamma).exp()
-        loss = focal_weight * log_probs
 
+        # Compute sigmoid activation
+        probs = torch.sigmoid(preds)
+        log_probs = F.logsigmoid(preds)
+        log_probs_neg = F.logsigmoid(-preds)
+
+         # Compute the focal loss component
+        p_t = probs * labels + (1 - probs) * (1 - labels)  # p_t = probs if label=1 else (1-probs)
+        modulating_factor = (1 - p_t) ** gamma
+
+         # Compute the basic cross-entropy loss
+        loss = -labels * log_probs - (1 - labels) * log_probs_neg
+
+        # Apply the focal weight
+        loss = modulating_factor * loss
+
+        # Apply the alpha factor (class imbalance)
         if alpha is not None:
-            # alpha if t==1; (1-alpha) if t==0
             alpha_factor = labels * alpha + (1 - labels) * (1 - alpha)
             loss = alpha_factor * loss
 
-        return loss
+        return loss.mean()  # Return the mean loss
 
+# Based on https://github.com/oyxhust/HAM
 class AMSELoss(nn.Module):
     def __init__(self, label_type, weight=None):
         super(AMSELoss, self).__init__()
         self.weight = weight
         self.label_type = label_type
     def forward(self, pred, target):
-        # 假設 pred 是預測的激活圖（CAM），target 是真實標籤
+        # pred 是預測的mask，target 是真實標籤(目前為totalsegmentator 產生的mask)
         # pred 和 target 的 shape (batch_size, num_classes, H, W, D)
-
-        if self.label_type == 'binary' or self.label_type == 'multiclass':
+        if self.label_type == 'multiclass':
             T_pred = torch.softmax(pred, dim=1)
-        elif self.label_type == 'multilabel':
+        elif self.label_type == 'binary' or self.label_type == 'multilabel':
             T_pred = torch.sigmoid(pred)
-            
-        mse_loss = (T_pred - target) ** 2
+        # 只看positive中不為零的部分
+        target_mask =  (target != 0)
+        T_pred_masked = T_pred * target_mask
+        target_masked = target * target_mask    
+        mse_loss = (T_pred_masked - target_masked) ** 2
         
         if self.weight is not None:
             # if self.weight.dim() == 1:
             # 將權重擴展至與 MSE Loss 相同的維度
             weight = self.weight.view(1, -1, 1, 1, 1)  # 將權重形狀變為 (1, num_callsse, 1, 1, 1)
             mse_loss = mse_loss * weight  # 對每個樣本/像素加權
-        
+
         # 計算分子部分：平方誤差
-        numerator = torch.sum(mse_loss, dim=(2, 3, 4))  
-        
+        numerator = torch.sum(mse_loss, dim=(2, 3, 4))
+
         # 計算分母部分：預測值和真實值的總和
-        denominator = torch.sum(T_pred, dim=(2, 3, 4)) + torch.sum(target, dim=(2, 3, 4)) 
-        
-        # 防止分母為 0
+        denominator = torch.sum(T_pred_masked, dim=(2, 3, 4)) + torch.sum(target_masked, dim=(2, 3, 4)) 
         denominator = torch.clamp(denominator, min=1e-5)  # 避免分母為 0
         
         # 計算最終的 AMSE 損失
@@ -1437,19 +1473,31 @@ class CombinedLoss(nn.Module):
 
     def forward(self, seg_output, seg_target, cls_output, cls_target):
         if self.seg == 'amse':
+            # 只針對positive label 取得其seg，negative為空。
+            # Mutiple class 目前取不同organ當作class，並使用不同channel來取得mask
+            if self.label_type == 'binary':
+                cls_target_expanded = cls_target.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) 
+                seg_target = seg_target * cls_target_expanded
+            elif self.label_type == 'multiclass':
+                cls_target_expanded = cls_target.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                seg_target = seg_target * cls_target_expanded
+            elif self.label_type == 'multilabel':
+                # cls_target like [1,0,0]
+                cls_target_expanded = cls_target.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) 
+                seg_target = seg_target * cls_target_expanded
             seg_loss = self.amse_loss(seg_output, seg_target)
         
         if self.cls == 'focal':
             if self.label_type == 'binary' or self.label_type == 'multiclass':
                 focal_loss = FocalLoss(gamma=2, alpha=0.25, use_softmax=True, weight=self.weight)
-            elif label_type == 'multilabel':
+            elif self.label_type == 'multilabel':
                 focal_loss = FocalLoss(gamma=2, alpha=0.25, use_softmax=False, weight=self.weight)
             cls_loss = focal_loss(cls_output, cls_target)
+
         elif self.cls == 'ce':
             cls_loss = self.ce_loss(cls_output, cls_target)
         
         total_loss = self.alpha * seg_loss + self.beta * cls_loss
-        
 
         return total_loss
 

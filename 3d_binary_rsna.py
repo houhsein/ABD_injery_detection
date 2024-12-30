@@ -26,7 +26,7 @@ sys.path.append("/tf/jacky831006/ABD_classification/model/")
 from efficientnet_3d.model_3d import EfficientNet3D
 from efficientnet_3d.Efficient3D_BIFPN import EfficientNet_FPN, UNetEfficientFPN, UNetEfficient
 from resnet_3d import resnet_3d
-from resnet_3d.resnet_3d_new import resnet101, ResNetWithClassifier
+from resnet_3d.resnet_3d_new import resnet101, ResNetWithClassifier, ResNetWithClassifierAndSegmentation
 from SuPreM.model.Universal_model import SwinUNETRClassifier
 # 此架構參考這篇
 # https://github.com/fei-aiart/NAS-Lung
@@ -69,7 +69,9 @@ from monai.transforms import (
 import functools
 # let all of print can be flush = ture
 print = functools.partial(print, flush=True)
-
+# label_type: binary 為判斷單一器官是否受損
+# multiclass 為判斷單一器官的受損程度(low, high, healthy)
+# multilabel 目前為判斷多個器官是否受損
 def get_parser():
     parser = argparse.ArgumentParser(description='Abdomen injury classification & segmentation')
     parser.add_argument('-f', '--file', help=" The config file name. ", type=str)
@@ -89,11 +91,14 @@ def get_parser():
 # cropping_dilation : 對Totalsegmatator出來的結果進行dilation
 # bbox : 對Totalsegmatator出來的結果進行dilation並且轉換成bounding box
 
+# 目前multilabel只有分不同organ 沒有分不同organ跟受傷程度
 def get_label(row, class_type, label_type):
     if label_type == 'binary':
         return 0 if row[f'{class_type}_healthy'] == 1 else 1
-    else:
+    elif label_type == 'multiclass':
         return np.array([row[f"{class_type}_healthy"], row[f"{class_type}_low"], row[f"{class_type}_high"]])
+    elif label_type == 'multilabel':
+        return np.array([row['spleen_healthy'], row['liver_healthy'], row['kidney_healthy']])
 
 def data_progress_all(file, dicts, class_type, label_type, image_type, attention_mask=False, seg=False):
     dicts = []
@@ -157,7 +162,13 @@ def data_progress_all(file, dicts, class_type, label_type, image_type, attention
                 dicts.append({'image':image_seg, 'seg_r':mask_r, 'seg_l':mask_l, 'label':label})
             else:
                 dicts.append({'image_r':image_kid_r,'image_l':image_kid_l,'label':label})
-            
+        elif class_type=='all':
+            # 所有organ用whole image來判別
+            mask_spl = os.path.join(mask_dir,"spl",output)+".nii.gz"
+            mask_liv = os.path.join(mask_dir,"liv",output)+".nii.gz"
+            mask_kid = os.path.join(mask_dir,"kid_all",output)+".nii.gz"
+            dicts.append({'image':image_seg, 'seg_spl':mask_spl, 'seg_liv':mask_liv, 'seg_kid':mask_kid, 'label':label})
+
     return dicts    
 
 def data_progress_liver(file, dicts, img_type):
@@ -352,6 +363,10 @@ def get_transforms(keys, size, prob, sigma_range, magnitude_range, translate_ran
         CropForegroundd_list = [
         CropForegroundd(keys=['image','seg'], source_key='image')
         ]
+    elif all(k in keys for k in ('seg_liv', 'seg_spl', 'seg_kid')):
+        CropForegroundd_list = [
+        CropForegroundd(keys=['image','seg_liv','seg_spl','seg_kid'], source_key='image')
+        ]
     else:
         CropForegroundd_list = [CropForegroundd(keys=[key], source_key=key) for key in keys]
         
@@ -390,6 +405,14 @@ def get_transforms(keys, size, prob, sigma_range, magnitude_range, translate_ran
     else:
         return Compose(common_transforms + augmentation_transforms)
 
+# 分配loss function weight
+def get_group_counts(df, col, num_samples):
+    grouped = df.groupby(col)
+    group_dict = {0: 0, 1: 0}
+    for name, group in grouped:
+        group_dict[name] = len(group) * num_samples
+    return (group_dict[0], group_dict[1])
+
 # 進行完整一次預測
 def run_once(times=0):
     # reset config parameter
@@ -420,17 +443,19 @@ def run_once(times=0):
     # True 為沒有修改原始架構(深度較深，最後的影像解析度較低)
     # False 則為修改原始架構(深度較淺，最後的影像解析度較高)
     # bbox 則代表input除了原始的影像外，還加入bounding box影像藉由channel增維
+
     if label_type == 'binary':
         label_num = 2
-    elif label_type == 'multicalss':
-        label_num = 3
-    elif label_type == 'multicalss':
-        label_num = 9 # (kid,spl,liv) X (_healty,_low,_high)
+    elif label_type == 'multicalss' :
+        label_num = 3 # (low, high, healthy)
+    elif label_type == 'multilabel':
+        label_num = 3 # (kid,spl,liv) 
 
     if attention_mask:
         input_channel = 2
     else:
         input_channel = 1
+        
 
     if architecture == 'densenet':
         if normal_structure:
@@ -479,11 +504,16 @@ def run_once(times=0):
         pretrain_dict = {new_key: v for k, v in checkpoint['net'].items() if (new_key := k.replace('module.', '')) in net_dict.keys() and "organ_embedding" not in new_key}
         net_dict.update(pretrain_dict)
         model.load_state_dict(net_dict)
+    
     elif seg and architecture == 'efficientnet_fpn_unet':
         model = UNetEfficientFPN(size=size, structure_num=structure_num, class_num=label_num, fpn_type=fpn_type, normal=False).to(device)
     
     elif seg and architecture == 'efficientnet_unet':
         model = UNetEfficient(size=size, structure_num=structure_num, class_num=label_num, normal=normal_structure).to(device)
+    
+    elif seg and architecture == 'resnet_unet':
+        base_model = resnet101(sample_input_W=size[0], sample_input_H=size[1], sample_input_D=size[2], num_input=input_channel, num_seg_classes=label_num, shortcut_type='B').to(device)
+        model = ResNetWithClassifierAndSegmentation(base_model, num_classes=label_num).to(device)
     # Mask attention block in CNN
     # Old version
     # if attention_mask:
@@ -497,33 +527,31 @@ def run_once(times=0):
 
     if class_type=='liver':
         #grouped = df_all.groupby('liver_inj_no')
-        grouped = df_all.groupby('liver_healthy')
+        weight_tuple = get_group_counts(df_all, 'liver_healthy', num_samples)
     elif class_type=='spleen':
         #grouped = df_all.groupby('spleen_inj_no')
-        grouped = df_all.groupby('spleen_healthy')
+        weight_tuple = get_group_counts(df_all, 'spleen_healthy', num_samples)
     elif class_type=='kidney': 
         #grouped = df_all.groupby('kidney_inj_no')
-        grouped = df_all.groupby('kidney_healthy')
-
-    # 根據資料比例來給予不同weight
-    group_dict = {0: 0, 1: 0}
-    for name, group in grouped:
-        # 只有kidney的negative情況會需要考慮兩側
-        # if class_type=='kidney' and name == 0:
-        #     pass
-        # else:
-        group_dict[name] = len(group) * num_samples
+        weight_tuple = get_group_counts(df_all, 'kidney_healthy', num_samples)
+    elif class_type=='all':
+        spleen_tuple = get_group_counts(df_all, 'spleen_healthy', num_samples)
+        liver_tuple = get_group_counts(df_all, 'liver_healthy', num_samples)
+        kidney_tuple = get_group_counts(df_all, 'kidney_healthy', num_samples)
+        
+        weight_tuple = (spleen_tuple[0], liver_tuple[0], kidney_tuple[0])
 
     if label_type == 'binary':
         # weights = torch.tensor([1/group_dict[1], 1/group_dict[0]]).to(device)
-        weights = torch.tensor([1/(group_dict[1] + 1e-6), 1/(group_dict[0] + 1e-6)]).to(device)
+        weights = torch.tensor([1/(weight_tuple[1] + 1e-6), 1/(weight_tuple[0] + 1e-6)]).to(device)
     elif label_type ==  'multiclass':
         class_weights = [1.0, 2.0, 4.0]
-        weights = torch.FloatTensor(class_weights).to(device)
+        weights = torch.FloatTensor(weight_tuple).to(device)
     elif label_type == 'multilabel':
-        class_weights = [1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
+        # class_weights = [1.0, 2.0, 4.0, 1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
+        class_weights = [1/weight_tuple[0], 1/weight_tuple[1], 1/weight_tuple[2]]
         weights = torch.FloatTensor(class_weights).to(device)
-    print(f'\npos:{group_dict[0]}, neg:{group_dict[1]}')
+    # print(f'\npos:{group_dict[0]}, neg:{group_dict[1]}')
     # CBAM有自己的loss function
     if architecture == 'CBAM' and not normal_structure:
         loss_function = AngleLoss(weight=weights)
@@ -711,7 +739,7 @@ if __name__ == '__main__':
     pos_data = All_data[All_data['any_injury']==1]
     # neg_data = All_data[All_data['any_injury']==0].sample(n=len(pos_data), random_state=seed)
     neg_data = All_data[All_data['any_injury']==0]
-    neg_data = neg_data.sample(n=int(len(neg_data)*0.5), random_state=seed)
+    neg_data = neg_data.sample(n=int(len(neg_data)*0.2), random_state=seed)
     All_data = pd.concat([pos_data, neg_data])
     no_seg_kid = pd.read_csv("/SSD/rsna-2023/nosegmentation_kid.csv")
     no_seg = pd.read_csv("/SSD/rsna-2023/nosegmentation.csv")
@@ -734,6 +762,8 @@ if __name__ == '__main__':
     elif seg:
         if class_type =='kidney':
             keys = ["image","seg_r","seg_l"]
+        elif class_type=='all':
+            keys = ["image","seg_spl","seg_liv","seg_kid"]
         else:
             keys = ["image","seg"]
     else:
